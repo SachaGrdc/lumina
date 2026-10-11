@@ -4,6 +4,7 @@ storage.py — logique métier de Lumina (AUCUNE dépendance à GTK).
 Responsabilités :
   * parcourir récursivement le dossier de notes et produire un arbre de `Node` ;
   * créer / lire / écrire / renommer / supprimer notes et dossiers ;
+  * gérer la corbeille (`.trash`) : mise à la corbeille, restauration, vidage ;
   * filtrer l'arbre pour la recherche ;
   * garantir que toute opération reste confinée dans le dossier racine.
 
@@ -12,29 +13,26 @@ Ce module peut être testé et réutilisé indépendamment de l'interface.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from i18n import _
 
 NOTE_EXTENSIONS = (".md", ".txt")
 DEFAULT_EXTENSION = ".md"
 DEFAULT_ROOT = Path.home() / "LuminaNotes"
-DEFAULT_NAME = "Sans titre"
+TRASH_DIR = ".trash"   # caché (commence par un point) : absent de l'arborescence
+# Index de la corbeille : nom dans .trash -> emplacement d'origine et date.
+TRASH_INDEX = ".lumina-trash.json"
 
 # Caractères interdits dans un nom de fichier (Windows étant le plus strict).
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-WELCOME_NOTE = """# Bienvenue dans Lumina
-
-Une application de notes minimaliste : rien que vous et vos idées.
-
-- Vos notes sont de simples fichiers `.md` dans ce dossier.
-- Créez des dossiers et sous-dossiers à l'infini avec le bouton **+**.
-- Tout est enregistré automatiquement pendant que vous écrivez.
-"""
 
 
 class StorageError(Exception):
@@ -53,6 +51,23 @@ class Node:
     def title(self) -> str:
         """Nom affiché : les notes sont montrées sans leur extension."""
         return self.path.name if self.is_dir else self.path.stem
+
+
+@dataclass(frozen=True)
+class TrashEntry:
+    """Élément mis à la corbeille : emplacement d'origine et emplacement actuel."""
+
+    original: Path
+    trashed: Path
+    deleted_at: float = 0.0   # horodatage (secondes depuis l'epoch), 0 si inconnu
+
+    @property
+    def is_dir(self) -> bool:
+        return self.trashed.is_dir()
+
+    @property
+    def title(self) -> str:
+        return self.original.name if self.is_dir else self.original.stem
 
 
 def filter_tree(root: Node, query: str) -> Node:
@@ -81,15 +96,28 @@ def filter_tree(root: Node, query: str) -> Node:
 class NoteStore:
     """Accès au système de fichiers pour les notes."""
 
-    def __init__(self, root: str | os.PathLike | None = None, seed: bool = True):
+    def __init__(self, root: str | os.PathLike | None = None):
         self.root = Path(root or DEFAULT_ROOT).expanduser().resolve()
         try:
             self.root.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            raise StorageError(f"Impossible de créer {self.root} : {e}") from e
-        # Première utilisation : une note d'accueil.
-        if seed and not any(self.root.iterdir()):
-            (self.root / "Bienvenue.md").write_text(WELCOME_NOTE, encoding="utf-8")
+            raise StorageError(_("Impossible de créer {path} : {error}").format(
+                path=self.root, error=e)) from e
+
+    def create_samples(self, samples: list[tuple[str, str]]) -> list[Path]:
+        """Écrit les notes d'exemple (chemin relatif, contenu) sans écraser l'existant."""
+        created = []
+        for relative, text in samples:
+            path = self._resolve(self.root / relative)
+            if path.exists():
+                continue
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            except OSError as e:
+                raise StorageError(_("Création impossible : {error}").format(error=e)) from e
+            created.append(path)
+        return created
 
     # ------------------------------------------------------------------ lecture
 
@@ -107,7 +135,7 @@ class NoteStore:
         dirs: list[Node] = []
         files: list[Node] = []
         for entry in entries:
-            if entry.name.startswith("."):  # fichiers cachés / temporaires
+            if entry.name.startswith("."):  # fichiers cachés / temporaires, corbeille
                 continue
             path = Path(entry.path)
             try:
@@ -129,7 +157,7 @@ class NoteStore:
         try:
             return path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
-            raise StorageError(f"Lecture impossible : {e}") from e
+            raise StorageError(_("Lecture impossible : {error}").format(error=e)) from e
 
     # ------------------------------------------------------------------ écriture
 
@@ -146,7 +174,7 @@ class NoteStore:
             os.replace(tmp_name, path)
             tmp_name = None
         except OSError as e:
-            raise StorageError(f"Enregistrement impossible : {e}") from e
+            raise StorageError(_("Enregistrement impossible : {error}").format(error=e)) from e
         finally:
             if tmp_name and os.path.exists(tmp_name):
                 try:
@@ -164,7 +192,7 @@ class NoteStore:
         try:
             path.touch(exist_ok=False)
         except OSError as e:
-            raise StorageError(f"Création impossible : {e}") from e
+            raise StorageError(_("Création impossible : {error}").format(error=e)) from e
         return path
 
     def create_folder(self, parent: Path, name: str) -> Path:
@@ -173,13 +201,13 @@ class NoteStore:
         try:
             path.mkdir()
         except OSError as e:
-            raise StorageError(f"Création impossible : {e}") from e
+            raise StorageError(_("Création impossible : {error}").format(error=e)) from e
         return path
 
     def rename(self, path: Path, new_name: str) -> Path:
         path = self._resolve(path)
         if path == self.root:
-            raise StorageError("Le dossier racine ne peut pas être renommé.")
+            raise StorageError(_("Le dossier racine ne peut pas être renommé."))
         base = self._sanitize(new_name)
         ext = ""
         if not path.is_dir():
@@ -190,11 +218,11 @@ class NoteStore:
         if target == path:
             return path
         if target.exists():
-            raise StorageError(f"« {target.name} » existe déjà.")
+            raise StorageError(_("« {name} » existe déjà.").format(name=target.name))
         try:
             path.rename(target)
         except OSError as e:
-            raise StorageError(f"Renommage impossible : {e}") from e
+            raise StorageError(_("Renommage impossible : {error}").format(error=e)) from e
         return target
 
     def move(self, src: Path, dest_folder: Path) -> Path:
@@ -206,13 +234,13 @@ class NoteStore:
         src = self._resolve(src)
         dest = self._resolve(dest_folder)
         if src == self.root:
-            raise StorageError("Le dossier racine ne peut pas être déplacé.")
+            raise StorageError(_("Le dossier racine ne peut pas être déplacé."))
         if not src.exists():
-            raise StorageError(f"« {src.name} » est introuvable.")
+            raise StorageError(_("« {name} » est introuvable.").format(name=src.name))
         if not dest.is_dir():
-            raise StorageError("La destination n'est pas un dossier.")
+            raise StorageError(_("La destination n'est pas un dossier."))
         if src.is_dir() and (dest == src or src in dest.parents):
-            raise StorageError("Un dossier ne peut pas être déplacé dans lui-même.")
+            raise StorageError(_("Un dossier ne peut pas être déplacé dans lui-même."))
         if src.parent == dest:
             return src
 
@@ -221,7 +249,7 @@ class NoteStore:
         try:
             shutil.move(str(src), str(target))
         except OSError as e:
-            raise StorageError(f"Déplacement impossible : {e}") from e
+            raise StorageError(_("Déplacement impossible : {error}").format(error=e)) from e
         return target
 
     def group_notes(self, src: Path, target: Path) -> tuple[Path, Path, Path]:
@@ -233,16 +261,16 @@ class NoteStore:
         src = self._resolve(src)
         target = self._resolve(target)
         if src == target:
-            raise StorageError("Impossible de regrouper une note avec elle-même.")
+            raise StorageError(_("Impossible de regrouper une note avec elle-même."))
         if src.is_dir() or target.is_dir():
-            raise StorageError("Seules des notes peuvent être regroupées.")
+            raise StorageError(_("Seules des notes peuvent être regroupées."))
 
         parent = target.parent
         folder = self._unique(parent, self._sanitize(target.stem), "")
         try:
             folder.mkdir()
         except OSError as e:
-            raise StorageError(f"Création impossible : {e}") from e
+            raise StorageError(_("Création impossible : {error}").format(error=e)) from e
 
         moved: list[tuple[Path, Path]] = []  # (ancien, nouveau) pour le rollback
         try:
@@ -264,11 +292,129 @@ class NoteStore:
     def delete(self, path: Path) -> None:
         path = self._resolve(path)
         if path == self.root:
-            raise StorageError("Le dossier racine ne peut pas être supprimé.")
+            raise StorageError(_("Le dossier racine ne peut pas être supprimé."))
         try:
             shutil.rmtree(path) if path.is_dir() else path.unlink()
         except OSError as e:
-            raise StorageError(f"Suppression impossible : {e}") from e
+            raise StorageError(_("Suppression impossible : {error}").format(error=e)) from e
+
+    # ------------------------------------------------------------------ corbeille
+
+    @property
+    def trash_dir(self) -> Path:
+        return self.root / TRASH_DIR
+
+    def move_to_trash(self, path: Path) -> TrashEntry:
+        """Déplace une note ou un dossier dans `.trash` (rien n'est effacé)."""
+        path = self._resolve(path)
+        if path == self.root:
+            raise StorageError(_("Le dossier racine ne peut pas être supprimé."))
+        if path == self.trash_dir or self.trash_dir in path.parents:
+            raise StorageError(_("Cet élément est déjà dans la corbeille."))
+        if not path.exists():
+            raise StorageError(_("« {name} » est introuvable.").format(name=path.name))
+        try:
+            self.trash_dir.mkdir(exist_ok=True)
+        except OSError as e:
+            raise StorageError(_("Corbeille inaccessible : {error}").format(error=e)) from e
+
+        base, ext = (path.name, "") if path.is_dir() else (path.stem, path.suffix)
+        target = self._unique(self.trash_dir, base, ext)
+        try:
+            shutil.move(str(path), str(target))
+        except OSError as e:
+            raise StorageError(_("Mise à la corbeille impossible : {error}").format(error=e)) from e
+
+        entry = TrashEntry(original=path, trashed=target, deleted_at=time.time())
+        index = self._read_trash_index()
+        index[target.name] = {"original": path.relative_to(self.root).as_posix(),
+                              "deleted": entry.deleted_at}
+        self._write_trash_index(index)
+        return entry
+
+    def list_trash(self) -> list[TrashEntry]:
+        """Éléments de la corbeille, du plus récent au plus ancien."""
+        try:
+            with os.scandir(self.trash_dir) as it:
+                names = [e.name for e in it if not e.name.startswith(".")]
+        except OSError:
+            return []
+        index = self._read_trash_index()
+        entries = []
+        for name in names:
+            info = index.get(name) if isinstance(index.get(name), dict) else {}
+            original = info.get("original")
+            original = self.root / original if isinstance(original, str) else self.root / name
+            deleted = info.get("deleted")
+            entries.append(TrashEntry(original=original, trashed=self.trash_dir / name,
+                                      deleted_at=deleted if isinstance(deleted, (int, float)) else 0.0))
+        entries.sort(key=lambda e: (-e.deleted_at, e.trashed.name.casefold()))
+        return entries
+
+    def restore(self, entry: TrashEntry) -> Path:
+        """Remet un élément de la corbeille à sa place (renommé en cas de collision)."""
+        trashed = self._check_trashed(entry)
+        original = self._resolve(entry.original)
+        if self.trash_dir in original.parents:  # index corrompu : retour à la racine
+            original = self.root / trashed.name
+        base, ext = ((original.name, "") if trashed.is_dir()
+                     else (original.stem, original.suffix))
+        try:
+            original.parent.mkdir(parents=True, exist_ok=True)  # le dossier parent a pu disparaître
+            target = self._unique(original.parent, base, ext)
+            shutil.move(str(trashed), str(target))
+        except OSError as e:
+            raise StorageError(_("Restauration impossible : {error}").format(error=e)) from e
+        self._forget_trashed(trashed.name)
+        return target
+
+    def delete_from_trash(self, entry: TrashEntry) -> None:
+        """Supprime définitivement un élément de la corbeille."""
+        trashed = self._check_trashed(entry)
+        try:
+            shutil.rmtree(trashed) if trashed.is_dir() else trashed.unlink()
+        except OSError as e:
+            raise StorageError(_("Suppression impossible : {error}").format(error=e)) from e
+        self._forget_trashed(trashed.name)
+
+    def empty_trash(self) -> int:
+        """Supprime définitivement tout le contenu de la corbeille ; retourne le nombre d'éléments."""
+        entries = self.list_trash()
+        if not self.trash_dir.exists():
+            return 0
+        try:
+            shutil.rmtree(self.trash_dir)
+        except OSError as e:
+            raise StorageError(_("Suppression impossible : {error}").format(error=e)) from e
+        return len(entries)
+
+    def _check_trashed(self, entry: TrashEntry) -> Path:
+        trashed = self._resolve(entry.trashed)
+        if trashed.parent != self.trash_dir or not trashed.exists():
+            raise StorageError(_("« {name} » n'est plus dans la corbeille.").format(
+                name=entry.trashed.name))
+        return trashed
+
+    def _read_trash_index(self) -> dict:
+        try:
+            data = json.loads((self.trash_dir / TRASH_INDEX).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_trash_index(self, index: dict) -> None:
+        path = self.trash_dir / TRASH_INDEX
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass  # sans index, la restauration se fait à la racine
+
+    def _forget_trashed(self, name: str) -> None:
+        index = self._read_trash_index()
+        if index.pop(name, None) is not None:
+            self._write_trash_index(index)
 
     # ------------------------------------------------------------------ helpers
 
@@ -278,13 +424,13 @@ class NoteStore:
         try:
             resolved.relative_to(self.root)
         except ValueError:
-            raise StorageError("Chemin en dehors du dossier de notes.") from None
+            raise StorageError(_("Chemin en dehors du dossier de notes.")) from None
         return resolved
 
     @staticmethod
     def _sanitize(name: str) -> str:
         cleaned = _INVALID_CHARS.sub("", name).strip().strip(".")
-        return cleaned or DEFAULT_NAME
+        return cleaned or _("Sans titre")
 
     @staticmethod
     def _unique(parent: Path, base: str, ext: str) -> Path:
