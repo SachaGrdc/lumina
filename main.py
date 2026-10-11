@@ -3,7 +3,15 @@
 Lumina — prise de notes ultra-minimaliste (GTK4 + Libadwaita).
 
 Ce fichier ne contient que l'interface graphique. Toute la logique de fichiers
-(parcours, création, lecture, écriture atomique, filtrage) est dans storage.py.
+(parcours, création, déplacement, regroupement, écriture atomique, filtrage)
+est dans storage.py.
+
+Glisser-déposer dans la barre latérale :
+  * note  -> note     : crée un dossier parent (nommé d'après la cible) et y range les deux ;
+  * note  -> dossier  : déplace la note dans le dossier ;
+  * dossier -> dossier: déplace le dossier (les cycles sont refusés) ;
+  * élément -> en-tête de la sidebar ou zone vide sous la liste : remonte à la racine.
+Un dossier replié s'ouvre tout seul si on le survole quelques instants.
 
 Dépendances :
   Debian/Ubuntu : sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
@@ -23,7 +31,8 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 from storage import Node, NoteStore, StorageError, filter_tree  # noqa: E402
 
 APP_ID = "dev.lumina.Notes"
-SAVE_DELAY_MS = 1000  # debouncing de la sauvegarde automatique
+SAVE_DELAY_MS = 1000     # debouncing de la sauvegarde automatique
+SPRING_DELAY_MS = 700    # survol d'un dossier replié pendant un glissement -> il s'ouvre
 
 CSS = """
 textview.lumina-editor,
@@ -31,7 +40,42 @@ textview.lumina-editor text {
     background: transparent;
     font-size: 115%;
 }
+
+/* ---- Glisser-déposer : retours visuels (couleurs d'accent Libadwaita) ---- */
+.lumina-row {
+    border-radius: 8px;
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+    transition: background-color 150ms ease-out,
+                outline-color 150ms ease-out,
+                opacity 150ms ease-out;
+}
+.lumina-row.lumina-dragging {            /* l'élément en cours de déplacement */
+    opacity: 0.4;
+}
+.lumina-row.lumina-drop-into {           /* dépôt DANS un dossier */
+    background-color: alpha(@accent_bg_color, 0.18);
+    outline-color: alpha(@accent_bg_color, 0.9);
+}
+.lumina-row.lumina-drop-group {          /* dépôt sur une note : création d'un dossier */
+    background-color: alpha(@accent_bg_color, 0.32);
+    outline-color: @accent_color;
+}
+.lumina-root-zone {
+    transition: background-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+.lumina-root-zone.lumina-drop-root {     /* dépôt à la racine */
+    background-color: alpha(@accent_bg_color, 0.14);
+    box-shadow: inset 0 0 0 2px alpha(@accent_bg_color, 0.8);
+}
 """
+
+# Type de dépôt -> classe CSS appliquée à la cible survolée
+_HL_CLASSES = {
+    "move": "lumina-drop-into",
+    "group": "lumina-drop-group",
+    "root": "lumina-drop-root",
+}
 
 
 class NoteItem(GObject.Object):
@@ -42,6 +86,9 @@ class NoteItem(GObject.Object):
     def __init__(self, node: Node):
         super().__init__()
         self.node = node
+        # Sous-modèle du dossier, créé à la demande puis conservé : on peut ainsi
+        # le modifier en place (insertions / suppressions) sans recharger l'arbre.
+        self.children_store: Gio.ListStore | None = None
 
 
 class LuminaWindow(Adw.ApplicationWindow):
@@ -58,9 +105,20 @@ class LuminaWindow(Adw.ApplicationWindow):
 
         # État de l'arbre
         self.tree_model: Gtk.TreeListModel | None = None
+        self.root_store: Gio.ListStore | None = None
         self._model_filtered = False
         self._expanded: set[Path] = set()
         self._query = ""
+
+        # État du glisser-déposer
+        self._drag_src: Path | None = None   # élément en cours de glissement
+        self._drag_src_is_dir = False
+        self._drag_widget: Gtk.Widget | None = None
+        self._hl_widget: Gtk.Widget | None = None   # cible actuellement en surbrillance
+        self._hl_kind: str | None = None
+        self._hl_icon: str | None = None
+        self._spring_source = 0
+        self._spring_path: Path | None = None
 
         self._build_ui()
         self._build_actions()
@@ -114,6 +172,11 @@ class LuminaWindow(Adw.ApplicationWindow):
 
         scrolled = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER,
                                       child=self.list_view)
+
+        # Zones « racine » : en-tête (toujours visible) + espace vide sous la liste.
+        # (Pas sur le champ de recherche : il accepterait le texte déposé.)
+        self._add_root_drop_target(header)
+        self._add_root_drop_target(scrolled)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(self.search_entry)
@@ -182,8 +245,12 @@ class LuminaWindow(Adw.ApplicationWindow):
 
     # ================================================================== Arbre
 
-    def reload_tree(self, select_path: Path | None = None):
-        """Reconstruit le modèle depuis le disque en conservant l'état d'expansion."""
+    def reload_tree(self, select_path: Path | None = None,
+                    expand_paths: set[Path] | None = None):
+        """
+        Reconstruit entièrement le modèle (changement de filtre de recherche).
+        Pour les modifications du disque, préférer `refresh_tree`, plus fluide.
+        """
         # Mémorise les dossiers ouverts (uniquement hors recherche : en recherche
         # tout est déplié automatiquement et ne doit pas polluer l'état).
         if self.tree_model is not None and not self._model_filtered:
@@ -194,18 +261,18 @@ class LuminaWindow(Adw.ApplicationWindow):
         if filtered:
             root = filter_tree(root, self._query)
 
-        root_store = Gio.ListStore(item_type=NoteItem)
+        self.root_store = Gio.ListStore(item_type=NoteItem)
         for child in root.children:
-            root_store.append(NoteItem(child))
+            self.root_store.append(NoteItem(child))
 
         # TreeListModel : chaque dossier fournit un sous-modèle via `_create_children`.
-        self.tree_model = Gtk.TreeListModel.new(root_store, False, filtered,
+        self.tree_model = Gtk.TreeListModel.new(self.root_store, False, filtered,
                                                 self._create_children)
         self._model_filtered = filtered
         self.selection.set_model(self.tree_model)
 
         if not filtered:
-            wanted = set(self._expanded)
+            wanted = set(self._expanded) | set(expand_paths or ())
             if select_path is not None:
                 wanted.update(p for p in select_path.parents if p != self.store.root)
             self._expanded = wanted
@@ -215,14 +282,66 @@ class LuminaWindow(Adw.ApplicationWindow):
         if target is not None:
             self._select_path(target)
 
+    def refresh_tree(self, select_path: Path | None = None,
+                     expand_paths: set[Path] | None = None):
+        """
+        Met l'arbre à jour d'après le disque SANS remplacer le modèle : seules les
+        lignes ajoutées / supprimées changent. L'état d'expansion, la sélection et
+        la position de défilement sont conservés.
+        """
+        if self.tree_model is None or self._model_filtered or self._query:
+            self.reload_tree(select_path, expand_paths)  # vue filtrée : reconstruction
+            return
+
+        self._sync_store(self.root_store, self.store.scan().children)
+
+        wanted = set(expand_paths or ())
+        if select_path is not None:
+            wanted.update(p for p in select_path.parents if p != self.store.root)
+        if wanted:
+            self._expand_rows(wanted)
+        if select_path is not None:
+            self._select_path(select_path)
+
+    def _sync_store(self, store: Gio.ListStore, nodes: list[Node]):
+        """
+        Aligne `store` sur `nodes` en supprimant / insérant uniquement la différence.
+        Les éléments conservés gardent leur sous-modèle (donc leur état déplié) ;
+        la synchronisation descend dans les sous-modèles déjà créés.
+        """
+        wanted = {n.path for n in nodes}
+
+        # 1. Retire ce qui a disparu.
+        i = 0
+        while i < store.get_n_items():
+            if store.get_item(i).node.path in wanted:
+                i += 1
+            else:
+                store.remove(i)
+
+        # 2. Met à jour l'existant et insère le nouveau, à la bonne position.
+        present = {}
+        for i in range(store.get_n_items()):
+            item = store.get_item(i)
+            present[item.node.path] = item
+        for pos, node in enumerate(nodes):
+            item = present.get(node.path)
+            if item is None:
+                store.insert(min(pos, store.get_n_items()), NoteItem(node))
+            else:
+                item.node = node
+                if item.children_store is not None:
+                    self._sync_store(item.children_store, node.children)
+
     @staticmethod
     def _create_children(item: NoteItem):
         if not item.node.is_dir:
             return None
-        children = Gio.ListStore(item_type=NoteItem)
-        for child in item.node.children:
-            children.append(NoteItem(child))
-        return children
+        if item.children_store is None:
+            item.children_store = Gio.ListStore(item_type=NoteItem)
+            for child in item.node.children:
+                item.children_store.append(NoteItem(child))
+        return item.children_store
 
     def _collect_expanded(self) -> set[Path]:
         expanded = set()
@@ -242,15 +361,23 @@ class LuminaWindow(Adw.ApplicationWindow):
                 row.set_expanded(True)
             i += 1
 
-    def _select_path(self, path: Path):
+    def _find_row(self, path: Path):
+        """Retourne (position, TreeListRow) de `path` dans le modèle, ou (None, None)."""
         for i in range(self.tree_model.get_n_items()):
-            if self.tree_model.get_row(i).get_item().node.path == path:
-                self.selection.set_selected(i)
-                try:
-                    self.list_view.scroll_to(i, Gtk.ListScrollFlags.NONE, None)
-                except (AttributeError, TypeError):  # GTK < 4.12
-                    pass
-                return
+            row = self.tree_model.get_row(i)
+            if row.get_item().node.path == path:
+                return i, row
+        return None, None
+
+    def _select_path(self, path: Path):
+        i, _row = self._find_row(path)
+        if i is None:
+            return
+        self.selection.set_selected(i)
+        try:
+            self.list_view.scroll_to(i, Gtk.ListScrollFlags.NONE, None)
+        except (AttributeError, TypeError):  # GTK < 4.12
+            pass
 
     # --- fabrique de lignes
 
@@ -259,7 +386,22 @@ class LuminaWindow(Adw.ApplicationWindow):
         box.append(Gtk.Image())
         box.append(Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END))
         expander = Gtk.TreeExpander(child=box)
+        expander.add_css_class("lumina-row")
         list_item.set_child(expander)
+
+        # Chaque ligne est à la fois une SOURCE de glissement et une CIBLE de dépôt.
+        source = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
+        source.connect("prepare", self._on_drag_prepare, list_item)
+        source.connect("drag-begin", self._on_drag_begin, list_item)
+        source.connect("drag-end", self._on_drag_end)
+        expander.add_controller(source)
+
+        target = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
+        target.connect("enter", self._on_row_drop_motion, list_item)
+        target.connect("motion", self._on_row_drop_motion, list_item)
+        target.connect("leave", self._on_row_drop_leave, list_item)
+        target.connect("drop", self._on_row_drop, list_item)
+        expander.add_controller(target)
 
     def _on_factory_bind(self, _factory, list_item):
         row = list_item.get_item()  # Gtk.TreeListRow
@@ -272,7 +414,11 @@ class LuminaWindow(Adw.ApplicationWindow):
         label.set_text(node.title)
 
     def _on_factory_unbind(self, _factory, list_item):
-        list_item.get_child().set_list_row(None)
+        expander = list_item.get_child()
+        if expander is self._hl_widget:  # la ligne est recyclée : on nettoie ses effets
+            self._clear_highlight()
+        expander.remove_css_class("lumina-dragging")
+        expander.set_list_row(None)
 
     # --- interactions
 
@@ -290,6 +436,222 @@ class LuminaWindow(Adw.ApplicationWindow):
 
     def _on_toggle_sidebar(self, *_):
         self.split_view.set_show_sidebar(not self.split_view.get_show_sidebar())
+
+    # ================================================================== Glisser-déposer
+
+    # --- source
+
+    def _on_drag_prepare(self, source, x, y, list_item):
+        row = list_item.get_item()
+        if row is None:
+            return None
+        node = row.get_item().node
+        # L'aperçu qui suit le curseur est un instantané de la ligne.
+        source.set_icon(Gtk.WidgetPaintable.new(list_item.get_child()), int(x), int(y))
+        # La charge utile est le chemin ; la validité est vérifiée à chaque survol.
+        return Gdk.ContentProvider.new_for_value(
+            GObject.Value(GObject.TYPE_STRING, str(node.path)))
+
+    def _on_drag_begin(self, _source, _drag, list_item):
+        row = list_item.get_item()
+        node = row.get_item().node
+        self._drag_src = node.path
+        self._drag_src_is_dir = node.is_dir
+        self._drag_widget = list_item.get_child()
+        self._drag_widget.add_css_class("lumina-dragging")
+
+    def _on_drag_end(self, _source, _drag, _delete_data):
+        if self._drag_widget is not None:
+            self._drag_widget.remove_css_class("lumina-dragging")
+        self._drag_widget = None
+        self._drag_src = None
+        self._clear_highlight()
+        self._cancel_spring()
+
+    # --- règles de dépôt
+
+    def _drop_kind(self, target: Node | None) -> str | None:
+        """
+        Que se passerait-il si on déposait l'élément glissé sur `target` ?
+          "move"  : déplacement dans le dossier `target`
+          "group" : création d'un dossier regroupant les deux notes
+          "root"  : déplacement à la racine (target = None)
+          None    : dépôt refusé
+        """
+        src = self._drag_src
+        if src is None:  # glissement qui ne vient pas de Lumina (texte externe…)
+            return None
+        if target is None:
+            return "root" if src.parent != self.store.root else None
+        if target.path == src:
+            return None
+        if target.is_dir:
+            if src.parent == target.path:  # déjà dedans
+                return None
+            if self._drag_src_is_dir and src in target.path.parents:  # cycle
+                return None
+            return "move"
+        return None if self._drag_src_is_dir else "group"
+
+    # --- cibles : lignes
+
+    def _on_row_drop_motion(self, _target, _x, _y, list_item):
+        row = list_item.get_item()
+        if row is None:
+            return 0
+        node = row.get_item().node
+        kind = self._drop_kind(node)
+        if kind is None:
+            self._clear_highlight()
+            self._cancel_spring()
+            return 0  # curseur « interdit »
+
+        self._set_highlight(list_item.get_child(), kind)
+        if kind == "move" and not row.get_expanded():
+            self._schedule_spring(node.path)  # ouverture automatique du dossier
+        else:
+            self._cancel_spring()
+        return Gdk.DragAction.MOVE
+
+    def _on_row_drop_leave(self, _target, list_item):
+        if list_item.get_child() is self._hl_widget:
+            self._clear_highlight()
+        self._cancel_spring()
+
+    def _on_row_drop(self, _target, value, _x, _y, list_item):
+        row = list_item.get_item()
+        self._clear_highlight()
+        self._cancel_spring()
+        src = self._drag_src
+        if row is None or src is None or str(value) != str(src):
+            return False
+        node = row.get_item().node
+        kind = self._drop_kind(node)
+        if kind is None:
+            return False
+        # L'opération est différée : on ne modifie pas le modèle (donc la ligne
+        # source) pendant que GTK finalise encore le glissement.
+        GLib.idle_add(self._perform_drop, kind, src, node.path)
+        return True
+
+    # --- cibles : racine
+
+    def _add_root_drop_target(self, widget: Gtk.Widget):
+        widget.add_css_class("lumina-root-zone")
+        target = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
+        target.connect("enter", self._on_root_drop_motion)
+        target.connect("motion", self._on_root_drop_motion)
+        target.connect("leave", self._on_root_drop_leave)
+        target.connect("drop", self._on_root_drop)
+        widget.add_controller(target)
+
+    def _on_root_drop_motion(self, target, _x, _y):
+        if self._drop_kind(None) != "root":
+            self._clear_highlight()
+            return 0
+        self._cancel_spring()
+        self._set_highlight(target.get_widget(), "root")
+        return Gdk.DragAction.MOVE
+
+    def _on_root_drop_leave(self, target):
+        if target.get_widget() is self._hl_widget:
+            self._clear_highlight()
+
+    def _on_root_drop(self, _target, value, _x, _y):
+        self._clear_highlight()
+        src = self._drag_src
+        if src is None or str(value) != str(src) or self._drop_kind(None) != "root":
+            return False
+        GLib.idle_add(self._perform_drop, "root", src, None)
+        return True
+
+    # --- retours visuels
+
+    @staticmethod
+    def _row_icon(expander: Gtk.Widget) -> Gtk.Image:
+        return expander.get_child().get_first_child()
+
+    def _set_highlight(self, widget: Gtk.Widget, kind: str):
+        if widget is self._hl_widget and kind == self._hl_kind:
+            return
+        self._clear_highlight()
+        widget.add_css_class(_HL_CLASSES[kind])
+        self._hl_widget, self._hl_kind = widget, kind
+        if kind == "group":  # l'icône annonce la création d'un dossier
+            icon = self._row_icon(widget)
+            self._hl_icon = icon.get_icon_name()
+            icon.set_from_icon_name("folder-new-symbolic")
+
+    def _clear_highlight(self):
+        widget = self._hl_widget
+        if widget is None:
+            return
+        widget.remove_css_class(_HL_CLASSES[self._hl_kind])
+        if self._hl_kind == "group" and self._hl_icon:
+            self._row_icon(widget).set_from_icon_name(self._hl_icon)
+        self._hl_widget = self._hl_kind = self._hl_icon = None
+
+    # --- ouverture automatique d'un dossier survolé
+
+    def _schedule_spring(self, path: Path):
+        if self._spring_path == path:
+            return
+        self._cancel_spring()
+        self._spring_path = path
+        self._spring_source = GLib.timeout_add(SPRING_DELAY_MS, self._spring_fire, path)
+
+    def _cancel_spring(self):
+        if self._spring_source:
+            GLib.source_remove(self._spring_source)
+        self._spring_source = 0
+        self._spring_path = None
+
+    def _spring_fire(self, path: Path):
+        self._spring_source = 0
+        self._spring_path = None
+        _i, row = self._find_row(path)
+        if row is not None:
+            row.set_expanded(True)
+        return GLib.SOURCE_REMOVE
+
+    # --- exécution
+
+    def _perform_drop(self, kind: str, src: Path, target: Path | None):
+        self._flush()  # la note ouverte est enregistrée avant que son fichier ne bouge
+        src_name = src.name if src.is_dir() else src.stem
+        try:
+            if kind == "group":
+                folder, new_src, new_target = self.store.group_notes(src, target)
+                self._remap_current(src, new_src)
+                self._remap_current(target, new_target)
+                select, expand = folder, {folder}
+                message = f"Dossier « {folder.name} » créé"
+            else:
+                dest = self.store.root if kind == "root" else target
+                new = self.store.move(src, dest)
+                self._remap_current(src, new)
+                select, expand = new, set()
+                where = "à la racine" if dest == self.store.root else f"dans « {dest.name} »"
+                message = f"« {src_name} » déplacé {where}"
+        except StorageError as e:
+            self.toast(str(e))
+            return GLib.SOURCE_REMOVE
+
+        if self.current_path is not None:
+            self.window_title.set_title(self.current_path.stem)
+        self.refresh_tree(select_path=select, expand_paths=expand)
+        self.toast(message)
+        return GLib.SOURCE_REMOVE
+
+    def _remap_current(self, old: Path, new: Path):
+        """Si la note ouverte se trouvait dans `old`, suit son déplacement vers `new`."""
+        if self.current_path is None:
+            return
+        try:
+            relative = self.current_path.relative_to(old)
+        except ValueError:
+            return
+        self.current_path = new / relative
 
     # ================================================================== Création
 
@@ -315,13 +677,13 @@ class LuminaWindow(Adw.ApplicationWindow):
                 return
             self.search_entry.set_text("")  # efface un éventuel filtre
             self._query = ""
-            self.reload_tree(select_path=path)
+            self.refresh_tree(select_path=path)
             if not is_folder:
                 self.open_note(path)
 
         self._ask_name(
             heading="Nouveau dossier" if is_folder else "Nouvelle note",
-            body=f"Créé dans : {parent.relative_to(self.store.root) or 'racine'}"
+            body=f"Créé dans : {parent.relative_to(self.store.root)}"
             if parent != self.store.root else "Créé à la racine",
             default="Nouveau dossier" if is_folder else "Sans titre",
             ok_label="Créer",

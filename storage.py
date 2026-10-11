@@ -197,6 +197,70 @@ class NoteStore:
             raise StorageError(f"Renommage impossible : {e}") from e
         return target
 
+    def move(self, src: Path, dest_folder: Path) -> Path:
+        """
+        Déplace une note ou un dossier à l'intérieur de `dest_folder`.
+        En cas de collision de nom, le nouvel élément est renommé (« Plan 2.md »).
+        Retourne le nouveau chemin (inchangé si l'élément y est déjà).
+        """
+        src = self._resolve(src)
+        dest = self._resolve(dest_folder)
+        if src == self.root:
+            raise StorageError("Le dossier racine ne peut pas être déplacé.")
+        if not src.exists():
+            raise StorageError(f"« {src.name} » est introuvable.")
+        if not dest.is_dir():
+            raise StorageError("La destination n'est pas un dossier.")
+        if src.is_dir() and (dest == src or src in dest.parents):
+            raise StorageError("Un dossier ne peut pas être déplacé dans lui-même.")
+        if src.parent == dest:
+            return src
+
+        base, ext = (src.name, "") if src.is_dir() else (src.stem, src.suffix)
+        target = self._unique(dest, base, ext)
+        try:
+            shutil.move(str(src), str(target))
+        except OSError as e:
+            raise StorageError(f"Déplacement impossible : {e}") from e
+        return target
+
+    def group_notes(self, src: Path, target: Path) -> tuple[Path, Path, Path]:
+        """
+        Crée un dossier à côté de `target` (nommé d'après elle) et y déplace
+        `target` et `src`. Retourne (dossier, nouveau_src, nouveau_target).
+        En cas d'échec, l'état initial est restauré.
+        """
+        src = self._resolve(src)
+        target = self._resolve(target)
+        if src == target:
+            raise StorageError("Impossible de regrouper une note avec elle-même.")
+        if src.is_dir() or target.is_dir():
+            raise StorageError("Seules des notes peuvent être regroupées.")
+
+        parent = target.parent
+        folder = self._unique(parent, self._sanitize(target.stem), "")
+        try:
+            folder.mkdir()
+        except OSError as e:
+            raise StorageError(f"Création impossible : {e}") from e
+
+        moved: list[tuple[Path, Path]] = []  # (ancien, nouveau) pour le rollback
+        try:
+            for item in (target, src):
+                moved.append((item, self.move(item, folder)))
+        except StorageError:
+            for old, new in reversed(moved):
+                try:
+                    shutil.move(str(new), str(old))
+                except OSError:
+                    pass
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+            raise
+        return folder, moved[1][1], moved[0][1]
+
     def delete(self, path: Path) -> None:
         path = self._resolve(path)
         if path == self.root:
