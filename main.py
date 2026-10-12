@@ -33,11 +33,35 @@ Dépendances :
   Windows       : MSYS2 UCRT64 -> pacman -S mingw-w64-ucrt-x86_64-{gtk4,libadwaita,python-gobject}
 """
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-import gi
+
+def _prefer_x11_on_wslg() -> None:
+    """
+    Sous WSLg (Linux dans Windows), le relais Wayland perd les menus surgissants de
+    GTK 4 : le menu « + » et les menus contextuels ne s'ouvrent pas, ou une seule
+    fois. Le backend X11 de WSLg (XWayland) n'a pas ce défaut : on le choisit, sauf
+    si GDK_BACKEND a été fixé explicitement. Sans effet hors de WSLg.
+
+    Sous ce backend X11, le moteur de rendu Vulkan (choix par défaut de GTK) ne peut
+    rien afficher : XWayland n'offre pas DRI3, la fenêtre reste transparente et
+    laisse passer les clics. Le moteur OpenGL, lui, s'affiche correctement : on
+    l'impose, sauf si GSK_RENDERER a été fixé explicitement.
+    Doit s'exécuter AVANT l'initialisation de GTK (import de gi.repository.Gtk).
+    """
+    if os.environ.get("GDK_BACKEND"):
+        return
+    if os.environ.get("WSL_DISTRO_NAME") and os.path.isdir("/mnt/wslg"):
+        os.environ["GDK_BACKEND"] = "x11"
+        os.environ.setdefault("GSK_RENDERER", "gl")
+
+
+_prefer_x11_on_wslg()
+
+import gi  # noqa: E402
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")

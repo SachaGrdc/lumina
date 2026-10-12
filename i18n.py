@@ -23,7 +23,7 @@ EN = {
     # --- fenêtre principale
     "Nouvelle note": "New note",
     "Nouveau dossier": "New folder",
-    "Nouveau": "New",
+    "Nouvel élément": "New item",
     "Menu principal": "Main menu",
     "Corbeille": "Trash",
     "Préférences": "Preferences",

@@ -145,20 +145,7 @@ class Sidebar(Adw.Bin):   # Adw.ToolbarView est une classe finale : on l'envelop
         self.title = Adw.WindowTitle(title="Lumina", subtitle="")
         header.set_title_widget(self.title)
 
-        new_menu = Gio.Menu()
-        new_menu.append(_("Nouvelle note"), "win.new-note")
-        new_menu.append(_("Nouvel onglet"), "win.new-tab")
-        new_menu.append(_("Nouveau dossier"), "win.new-folder")
-        # Le bouton « + » est collé au bord gauche de la fenêtre : centré sur lui (le
-        # défaut), le menu — large, avec ses raccourcis — déborderait à gauche. Il est
-        # donc ancré sous le bouton et aligné sur son bord gauche : il s'ouvre vers
-        # l'intérieur de la fenêtre.
-        new_popover = Gtk.PopoverMenu.new_from_model(new_menu)
-        new_button = Gtk.MenuButton(icon_name="list-add-symbolic", popover=new_popover,
-                                    direction=Gtk.ArrowType.DOWN, tooltip_text=_("Nouveau"))
-        new_popover.set_position(Gtk.PositionType.BOTTOM)
-        new_popover.set_halign(Gtk.Align.START)
-        header.pack_start(new_button)
+        header.pack_start(self._build_new_button())
 
         # Menu principal. La Corbeille n'y figure pas : son bouton à bascule, en bas
         # de la barre latérale, est le seul accès (pas de doublon).
@@ -229,6 +216,30 @@ class Sidebar(Adw.Bin):   # Adw.ToolbarView est une classe finale : on l'envelop
         view.add_top_bar(header)
         view.add_bottom_bar(bottom)
         self.set_child(view)
+
+    @staticmethod
+    def _build_new_button() -> Gtk.MenuButton:
+        """
+        Bouton « + » : un Gtk.MenuButton natif, sans AUCUN gestionnaire de clic —
+        il ouvre et ferme seul le menu qu'il crée à partir du modèle (set_menu_model).
+        Les raccourcis (Ctrl+N, Ctrl+Maj+N, Ctrl+T) s'affichent d'eux-mêmes dans le menu.
+        """
+        menu = Gio.Menu()
+        menu.append(_("Nouvelle note"), "win.new-note")
+        menu.append(_("Nouveau dossier"), "win.new-folder")
+        menu.append(_("Nouvel onglet"), "win.new-tab")
+
+        button = Gtk.MenuButton(icon_name="list-add-symbolic", tooltip_text=_("Nouvel élément"))
+        button.add_css_class("flat")
+        button.set_menu_model(menu)
+        button.set_direction(Gtk.ArrowType.DOWN)   # menu sous le bouton (Gtk.PositionType.BOTTOM)
+        # Le bouton est collé au bord gauche de la fenêtre : centré sur lui (le défaut),
+        # le menu en sortirait. Aligné sur son bord gauche, il s'ouvre vers l'intérieur ;
+        # sans flèche, qui pointerait sinon de travers par rapport au menu.
+        popover = button.get_popover()
+        popover.set_halign(Gtk.Align.START)
+        popover.set_has_arrow(False)
+        return button
 
     # ================================================================== API
 
