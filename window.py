@@ -18,7 +18,7 @@ Actions de la fenêtre :
   sans paramètre   win.new-note · win.new-folder · win.rename (F2) · win.save
                    win.new-tab · win.close-tab · win.print
                    win.focus-search · win.toggle-sidebar · win.empty-trash
-  à état (booléen) win.show-trash   (page « Corbeille » de la barre latérale)
+  à état (booléen) win.show-trash   (page « Corbeille », bouton en bas de la barre latérale)
   avec chemin ("s") win.item-open-tab · win.item-new-note · win.item-new-folder
                    win.item-pin · win.item-rename · win.item-delete (menus contextuels)
                    win.trash-restore · win.trash-delete (menu de la corbeille)

@@ -149,12 +149,21 @@ class Sidebar(Adw.Bin):   # Adw.ToolbarView est une classe finale : on l'envelop
         new_menu.append(_("Nouvelle note"), "win.new-note")
         new_menu.append(_("Nouvel onglet"), "win.new-tab")
         new_menu.append(_("Nouveau dossier"), "win.new-folder")
-        header.pack_start(Gtk.MenuButton(icon_name="list-add-symbolic", menu_model=new_menu,
-                                         tooltip_text=_("Nouveau")))
+        # Le bouton « + » est collé au bord gauche de la fenêtre : centré sur lui (le
+        # défaut), le menu — large, avec ses raccourcis — déborderait à gauche. Il est
+        # donc ancré sous le bouton et aligné sur son bord gauche : il s'ouvre vers
+        # l'intérieur de la fenêtre.
+        new_popover = Gtk.PopoverMenu.new_from_model(new_menu)
+        new_button = Gtk.MenuButton(icon_name="list-add-symbolic", popover=new_popover,
+                                    direction=Gtk.ArrowType.DOWN, tooltip_text=_("Nouveau"))
+        new_popover.set_position(Gtk.PositionType.BOTTOM)
+        new_popover.set_halign(Gtk.Align.START)
+        header.pack_start(new_button)
 
+        # Menu principal. La Corbeille n'y figure pas : son bouton à bascule, en bas
+        # de la barre latérale, est le seul accès (pas de doublon).
         main_menu = Gio.Menu()
         for label, action in ((_("Imprimer / Exporter en PDF…"), "win.print"),
-                              (_("Corbeille"), "win.show-trash"),
                               (_("Préférences"), "app.preferences")):
             section = Gio.Menu()
             section.append(label, action)
