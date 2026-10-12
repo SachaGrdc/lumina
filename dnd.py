@@ -4,7 +4,8 @@ dnd.py — glisser-déposer dans la barre latérale (mixin de LuminaWindow).
   * note    -> note    : crée un dossier parent (nommé d'après la cible) et y range les deux ;
   * note    -> dossier : déplace la note dans le dossier ;
   * dossier -> dossier : déplace le dossier (les cycles sont refusés) ;
-  * élément -> en-tête de la sidebar ou zone vide sous la liste : remonte à la racine.
+  * élément -> en-tête de la sidebar ou zone vide sous la liste : remonte à la racine ;
+  * note    -> zone d'édition : ouvre la note dans un nouvel onglet.
 Un dossier replié s'ouvre tout seul si on le survole quelques instants.
 
 Fichiers externes (gestionnaire de fichiers : Nautilus, Explorateur…) : les
@@ -12,7 +13,7 @@ Fichiers externes (gestionnaire de fichiers : Nautilus, Explorateur…) : les
 survole une note, racine pour l'en-tête ou la zone vide).
 
 Les deux cas partagent les mêmes cibles de dépôt : un glissement interne
-transporte un chemin (str), un glissement externe une Gdk.FileList.
+transporte un `DragPayload`, un glissement externe une Gdk.FileList.
 
 Le mixin attend de la fenêtre : `store`, `toast()`, `refresh_tree()`, `_flush()`,
 `_find_row()`, `_path_moved()`, `_expanded_snapshot()`, `_remap_paths()` et `open_note()`.
@@ -35,7 +36,22 @@ _HL_CLASSES = {
     "move": "lumina-drop-into",
     "group": "lumina-drop-group",
     "root": "lumina-drop-root",
+    "open": "lumina-drop-open",
 }
+
+
+class DragPayload(GObject.Object):
+    """
+    Charge utile d'un glissement interne. Un type propre à Lumina, et non du texte :
+    le TextView de l'éditeur (ou le champ de recherche) insérerait sinon le chemin
+    déposé ; ce type n'est accepté que par les cibles de Lumina.
+    """
+
+    __gtype_name__ = "LuminaDragPayload"
+
+    def __init__(self, path: Path):
+        super().__init__()
+        self.path = path
 
 
 class DragDropMixin:
@@ -51,7 +67,8 @@ class DragDropMixin:
 
     def _attach_row_dnd(self, expander: Gtk.Widget, list_item):
         """Chaque ligne est à la fois une SOURCE de glissement et une CIBLE de dépôt."""
-        source = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
+        # MOVE : rangement dans la sidebar ; COPY : ouverture dans un onglet (zone d'édition).
+        source = Gtk.DragSource(actions=Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
         source.connect("prepare", self._on_drag_prepare, list_item)
         source.connect("drag-begin", self._on_drag_begin, list_item)
         source.connect("drag-end", self._on_drag_end)
@@ -66,10 +83,15 @@ class DragDropMixin:
 
     @staticmethod
     def _new_drop_target() -> Gtk.DropTarget:
-        """Cible acceptant un élément de la sidebar (chemin) ou des fichiers externes."""
+        """Cible acceptant un élément de la sidebar (DragPayload) ou des fichiers externes."""
         target = Gtk.DropTarget.new(GObject.TYPE_NONE, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
-        target.set_gtypes([Gdk.FileList, GObject.TYPE_STRING])   # FileList d'abord
+        target.set_gtypes([Gdk.FileList, DragPayload.__gtype__])
         return target
+
+    def _is_dragged(self, value) -> bool:
+        """Vrai si `value` est bien la charge utile du glissement interne en cours."""
+        return (self._drag_src is not None and isinstance(value, DragPayload)
+                and value.path == self._drag_src)
 
     def _is_external(self, target: Gtk.DropTarget) -> bool:
         """Vrai si le glissement en cours apporte des fichiers depuis l'extérieur de Lumina."""
@@ -94,9 +116,9 @@ class DragDropMixin:
         node = row.get_item().node
         # L'aperçu qui suit le curseur est un instantané de la ligne.
         source.set_icon(Gtk.WidgetPaintable.new(list_item.get_child()), int(x), int(y))
-        # La charge utile est le chemin ; la validité est vérifiée à chaque survol.
+        # La charge utile porte le chemin ; la validité est vérifiée à chaque survol.
         return Gdk.ContentProvider.new_for_value(
-            GObject.Value(GObject.TYPE_STRING, str(node.path)))
+            GObject.Value(DragPayload.__gtype__, DragPayload(node.path)))
 
     def _on_drag_begin(self, _source, _drag, list_item):
         row = list_item.get_item()
@@ -184,9 +206,9 @@ class DragDropMixin:
             dest = node.path if node.is_dir else node.path.parent
             GLib.idle_add(self._perform_import, value.get_files(), dest)
             return True
-        src = self._drag_src
-        if src is None or str(value) != str(src):
+        if not self._is_dragged(value):
             return False
+        src = self._drag_src
         kind = self._drop_kind(node)
         if kind is None:
             return False
@@ -227,11 +249,40 @@ class DragDropMixin:
         if isinstance(value, Gdk.FileList):
             GLib.idle_add(self._perform_import, value.get_files(), self.store.root)
             return True
-        src = self._drag_src
-        if src is None or str(value) != str(src) or self._drop_kind(None) != "root":
+        if not self._is_dragged(value) or self._drop_kind(None) != "root":
             return False
-        GLib.idle_add(self._perform_drop, "root", src, None)
+        GLib.idle_add(self._perform_drop, "root", self._drag_src, None)
         return True
+
+    # --- cible : zone d'édition (la note glissée s'ouvre dans un nouvel onglet)
+
+    def _add_editor_drop_target(self, widget: Gtk.Widget):
+        widget.add_css_class("lumina-editor-zone")
+        target = Gtk.DropTarget.new(DragPayload.__gtype__, Gdk.DragAction.COPY)
+        target.connect("enter", self._on_editor_drop_motion)
+        target.connect("motion", self._on_editor_drop_motion)
+        target.connect("leave", self._on_root_drop_leave)
+        target.connect("drop", self._on_editor_drop)
+        widget.add_controller(target)
+
+    def _on_editor_drop_motion(self, target, _x, _y):
+        if self._drag_src is None or self._drag_src_is_dir:  # seules les notes s'ouvrent
+            self._clear_highlight()
+            return 0
+        self._cancel_spring()
+        self._set_highlight(target.get_widget(), "open")
+        return Gdk.DragAction.COPY
+
+    def _on_editor_drop(self, _target, value, _x, _y):
+        self._clear_highlight()
+        if not self._is_dragged(value) or self._drag_src_is_dir:
+            return False
+        GLib.idle_add(self._open_dropped, self._drag_src)
+        return True
+
+    def _open_dropped(self, path: Path):
+        self.open_note(path, new_tab=True)  # déjà ouverte : bascule sur son onglet
+        return GLib.SOURCE_REMOVE
 
     # --- retours visuels
 

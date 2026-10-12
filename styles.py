@@ -55,6 +55,13 @@ textview.lumina-editor border {          /* marge du TextView qui accueille la g
     background-color: alpha(@accent_bg_color, 0.14);
     box-shadow: inset 0 0 0 2px alpha(@accent_bg_color, 0.8);
 }
+.lumina-editor-zone {
+    transition: background-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+.lumina-editor-zone.lumina-drop-open {   /* note déposée sur l'éditeur : nouvel onglet */
+    background-color: alpha(@accent_bg_color, 0.06);
+    box-shadow: inset 0 0 0 2px alpha(@accent_bg_color, 0.8);
+}
 """
 
 _THEMES = {

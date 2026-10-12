@@ -176,7 +176,6 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
                                       child=self.list_view)
 
         # Zones « racine » du glisser-déposer : en-tête + espace vide sous la liste.
-        # (Pas sur le champ de recherche : il accepterait le texte déposé.)
         self._add_root_drop_target(header)
         self._add_root_drop_target(scrolled)
 
@@ -224,6 +223,7 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         self.tabs.add(self._make_page())
 
         self.toast_overlay = Adw.ToastOverlay(child=self.tabs.view)
+        self._add_editor_drop_target(self.toast_overlay)  # note glissée -> nouvel onglet
         view = Adw.ToolbarView(content=self.toast_overlay)
         view.add_top_bar(header)
         view.add_top_bar(self.tabs.bar)
