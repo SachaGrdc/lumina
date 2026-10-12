@@ -29,9 +29,6 @@ EN = {
     "Préférences": "Preferences",
     "Rechercher…": "Search…",
     "Afficher / masquer la barre latérale (Ctrl+\\)": "Show / hide the sidebar (Ctrl+\\)",
-    "Aucune note ouverte": "No note open",
-    "Sélectionnez une note dans la barre latérale ou créez-en une nouvelle.":
-        "Select a note in the sidebar or create a new one.",
     "Annuler": "Cancel",
     "Note épinglée": "Note pinned",
     "Note désépinglée": "Note unpinned",
@@ -42,9 +39,15 @@ EN = {
     "Renommer": "Rename",
     "Nouveau nom pour le dossier « {name} »": "New name for the folder “{name}”",
     "Nouveau nom pour la note « {name} »": "New name for the note “{name}”",
-    "Modifications en cours…": "Unsaved changes…",
-    "Enregistré": "Saved",
     "Épinglées": "Pinned",
+    "Nouvel onglet": "New tab",
+    "Ouvrir dans un nouvel onglet": "Open in New Tab",
+    "Imprimer / Exporter en PDF…": "Print / Export as PDF…",
+    "Impression impossible : {error}": "Could not print: {error}",
+    "Ctrl+clic pour ouvrir le lien": "Ctrl+click to open the link",
+    "Impossible d'ouvrir le lien : {error}": "Could not open the link: {error}",
+    "« {name} » importé": "“{name}” imported",
+    "{count} notes importées": "{count} notes imported",
     # --- glisser-déposer
     "Dossier « {name} » créé": "Folder “{name}” created",
     "« {name} » déplacé à la racine": "“{name}” moved to the top level",
@@ -58,11 +61,6 @@ EN = {
     "Restaurer le dossier": "Restore folder",
     "Supprimer définitivement…": "Delete permanently…",
     # --- corbeille
-    "Mettre « {name} » à la corbeille ?": "Move “{name}” to the trash?",
-    "Le dossier et tout son contenu seront déplacés dans la corbeille.":
-        "The folder and everything in it will be moved to the trash.",
-    "La note sera déplacée dans la corbeille.": "The note will be moved to the trash.",
-    "Vous pourrez la restaurer depuis la corbeille.": "You can restore it from the trash.",
     "« {name} » mis à la corbeille": "“{name}” moved to the trash",
     "« {name} » restauré": "“{name}” restored",
     "« {name} » n'est plus dans la corbeille.": "“{name}” is no longer in the trash.",
@@ -132,6 +130,8 @@ EN = {
     "Mise à la corbeille impossible : {error}": "Could not move to the trash: {error}",
     "Restauration impossible : {error}": "Could not restore: {error}",
     "Chemin en dehors du dossier de notes.": "Path outside the notes folder.",
+    "Seuls les fichiers .md et .txt peuvent être importés.": "Only .md and .txt files can be imported.",
+    "Importation impossible : {error}": "Could not import: {error}",
 }
 
 TRANSLATIONS: dict[str, dict[str, str]] = {"en": EN}

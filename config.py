@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from storage import DEFAULT_ROOT
@@ -40,6 +40,9 @@ class Config:
     theme: str = "system"         # voir THEMES
     font_size: int = 13           # points
     line_numbers: bool = False
+    # Onglets ouverts à la fermeture, rouverts au lancement : [{"path": str, "cursor": int}…]
+    tabs: list = field(default_factory=list)
+    active_tab: int = 0
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> tuple["Config", bool]:
@@ -75,3 +78,7 @@ class Config:
         self.font_size = min(max(self.font_size, low), high)
         if not self.notes_dir.strip():
             self.notes_dir = str(DEFAULT_ROOT)
+        self.tabs = [{"path": t["path"],
+                      "cursor": t["cursor"] if isinstance(t.get("cursor"), int) else 0}
+                     for t in self.tabs if isinstance(t, dict) and isinstance(t.get("path"), str)]
+        self.active_tab = max(self.active_tab, 0)

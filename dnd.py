@@ -7,8 +7,15 @@ dnd.py — glisser-déposer dans la barre latérale (mixin de LuminaWindow).
   * élément -> en-tête de la sidebar ou zone vide sous la liste : remonte à la racine.
 Un dossier replié s'ouvre tout seul si on le survole quelques instants.
 
+Fichiers externes (gestionnaire de fichiers : Nautilus, Explorateur…) : les
+.md / .txt déposés sont COPIÉS dans le dossier survolé (dossier parent si l'on
+survole une note, racine pour l'en-tête ou la zone vide).
+
+Les deux cas partagent les mêmes cibles de dépôt : un glissement interne
+transporte un chemin (str), un glissement externe une Gdk.FileList.
+
 Le mixin attend de la fenêtre : `store`, `toast()`, `refresh_tree()`, `_flush()`,
-`_find_row()`, `_path_moved()`, `_expanded_snapshot()` et `_remap_paths()`.
+`_find_row()`, `_path_moved()`, `_expanded_snapshot()`, `_remap_paths()` et `open_note()`.
 """
 
 from pathlib import Path
@@ -50,12 +57,25 @@ class DragDropMixin:
         source.connect("drag-end", self._on_drag_end)
         expander.add_controller(source)
 
-        target = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
+        target = self._new_drop_target()
         target.connect("enter", self._on_row_drop_motion, list_item)
         target.connect("motion", self._on_row_drop_motion, list_item)
         target.connect("leave", self._on_row_drop_leave, list_item)
         target.connect("drop", self._on_row_drop, list_item)
         expander.add_controller(target)
+
+    @staticmethod
+    def _new_drop_target() -> Gtk.DropTarget:
+        """Cible acceptant un élément de la sidebar (chemin) ou des fichiers externes."""
+        target = Gtk.DropTarget.new(GObject.TYPE_NONE, Gdk.DragAction.MOVE | Gdk.DragAction.COPY)
+        target.set_gtypes([Gdk.FileList, GObject.TYPE_STRING])   # FileList d'abord
+        return target
+
+    def _is_external(self, target: Gtk.DropTarget) -> bool:
+        """Vrai si le glissement en cours apporte des fichiers depuis l'extérieur de Lumina."""
+        drop = target.get_current_drop()
+        return (self._drag_src is None and drop is not None
+                and drop.get_formats().contain_gtype(Gdk.FileList))
 
     def _dnd_row_unbound(self, expander: Gtk.Widget):
         """La ligne est recyclée par la ListView : on nettoie ses effets visuels."""
@@ -121,11 +141,20 @@ class DragDropMixin:
 
     # --- cibles : lignes
 
-    def _on_row_drop_motion(self, _target, _x, _y, list_item):
+    def _on_row_drop_motion(self, target, _x, _y, list_item):
         row = list_item.get_item()
         if row is None:
             return 0
         node = row.get_item().node
+        if self._is_external(target):  # import : dans le dossier survolé, ou celui de la note
+            if node.is_dir:
+                self._set_highlight(list_item.get_child(), "move")
+                if not row.get_expanded():
+                    self._schedule_spring(node.path)
+            else:
+                self._clear_highlight()
+                self._cancel_spring()
+            return Gdk.DragAction.COPY
         kind = self._drop_kind(node)
         if kind is None:
             self._clear_highlight()
@@ -148,10 +177,16 @@ class DragDropMixin:
         row = list_item.get_item()
         self._clear_highlight()
         self._cancel_spring()
-        src = self._drag_src
-        if row is None or src is None or str(value) != str(src):
+        if row is None:
             return False
         node = row.get_item().node
+        if isinstance(value, Gdk.FileList):
+            dest = node.path if node.is_dir else node.path.parent
+            GLib.idle_add(self._perform_import, value.get_files(), dest)
+            return True
+        src = self._drag_src
+        if src is None or str(value) != str(src):
+            return False
         kind = self._drop_kind(node)
         if kind is None:
             return False
@@ -164,7 +199,7 @@ class DragDropMixin:
 
     def _add_root_drop_target(self, widget: Gtk.Widget):
         widget.add_css_class("lumina-root-zone")
-        target = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE)
+        target = self._new_drop_target()
         target.connect("enter", self._on_root_drop_motion)
         target.connect("motion", self._on_root_drop_motion)
         target.connect("leave", self._on_root_drop_leave)
@@ -172,6 +207,10 @@ class DragDropMixin:
         widget.add_controller(target)
 
     def _on_root_drop_motion(self, target, _x, _y):
+        if self._is_external(target):
+            self._cancel_spring()
+            self._set_highlight(target.get_widget(), "root")
+            return Gdk.DragAction.COPY
         if self._drop_kind(None) != "root":
             self._clear_highlight()
             return 0
@@ -185,6 +224,9 @@ class DragDropMixin:
 
     def _on_root_drop(self, _target, value, _x, _y):
         self._clear_highlight()
+        if isinstance(value, Gdk.FileList):
+            GLib.idle_add(self._perform_import, value.get_files(), self.store.root)
+            return True
         src = self._drag_src
         if src is None or str(value) != str(src) or self._drop_kind(None) != "root":
             return False
@@ -269,4 +311,28 @@ class DragDropMixin:
 
         self.refresh_tree(select_path=select, expand_paths=expand)
         self.toast(message)
+        return GLib.SOURCE_REMOVE
+
+    def _perform_import(self, files: list, dest: Path):
+        """Copie les fichiers externes déposés (Gio.File) dans `dest`."""
+        imported: list[Path] = []
+        error = None
+        for file in files:
+            path = file.get_path()  # None pour un fichier distant (sftp://…)
+            try:
+                if path is None:
+                    raise StorageError(_("Seuls les fichiers .md et .txt peuvent être importés."))
+                imported.append(self.store.import_note(Path(path), dest))
+            except StorageError as e:
+                error = str(e)
+
+        if imported:
+            self.refresh_tree(select_path=imported[-1])
+            if len(imported) == 1:
+                self.open_note(imported[0])
+                self.toast(_("« {name} » importé").format(name=imported[0].stem))
+            else:
+                self.toast(_("{count} notes importées").format(count=len(imported)))
+        if error is not None:  # au moins un fichier refusé (dossier, image…)
+            self.toast(error)
         return GLib.SOURCE_REMOVE

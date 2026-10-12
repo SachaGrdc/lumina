@@ -26,6 +26,11 @@ def build_item_menu(path: Path, is_dir: bool, is_pinned: bool) -> Gio.Menu:
     """Construit le menu d'un élément de l'arborescence ou des épingles."""
     menu = Gio.Menu()
 
+    if not is_dir:
+        open_section = Gio.Menu()
+        open_section.append_item(_item(_("Ouvrir dans un nouvel onglet"), "item-open-tab", path))
+        menu.append_section(None, open_section)
+
     create = Gio.Menu()
     create.append_item(_item(_("Nouvelle note"), "item-new-note", path))
     create.append_item(_item(_("Nouveau dossier"), "item-new-folder", path))

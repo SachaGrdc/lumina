@@ -5,7 +5,8 @@ Responsabilités :
   * parcourir récursivement le dossier de notes et produire un arbre de `Node` ;
   * créer / lire / écrire / renommer / supprimer notes et dossiers ;
   * gérer la corbeille (`.trash`) : mise à la corbeille, restauration, vidage ;
-  * filtrer l'arbre pour la recherche ;
+  * filtrer l'arbre pour la recherche (titres et contenu des notes) ;
+  * importer des fichiers externes (glisser-déposer depuis le gestionnaire de fichiers) ;
   * garantir que toute opération reste confinée dans le dossier racine.
 
 Ce module peut être testé et réutilisé indépendamment de l'interface.
@@ -19,6 +20,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections.abc import Container, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +35,10 @@ TRASH_INDEX = ".lumina-trash.json"
 
 # Caractères interdits dans un nom de fichier (Windows étant le plus strict).
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Extrait affiché sous un résultat de recherche : contexte avant / après l'occurrence.
+SNIPPET_BEFORE = 24
+SNIPPET_AFTER = 80
 
 
 class StorageError(Exception):
@@ -70,10 +76,43 @@ class TrashEntry:
         return self.original.name if self.is_dir else self.original.stem
 
 
-def filter_tree(root: Node, query: str) -> Node:
+@dataclass(frozen=True)
+class Snippet:
+    """Extrait d'une note autour d'une occurrence de la recherche."""
+
+    text: str     # une seule ligne
+    start: int    # position de l'occurrence dans `text`
+    end: int
+
+
+def make_snippet(text: str, start: int, end: int) -> Snippet:
+    """Extrait la ligne contenant text[start:end], raccourcie autour de l'occurrence."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    a = max(line_start, start - SNIPPET_BEFORE)
+    b = min(line_end, end + SNIPPET_AFTER)
+    before = ("…" if a > line_start else "") + text[a:start].lstrip()
+    after = text[end:b].rstrip() + ("…" if b < line_end else "")
+    snippet = (before + text[start:end] + after).replace("\t", " ")
+    return Snippet(snippet, len(before), len(before) + end - start)
+
+
+def iter_notes(node: Node) -> Iterator[Path]:
+    """Toutes les notes (pas les dossiers) de l'arbre `node`."""
+    for child in node.children:
+        if child.is_dir:
+            yield from iter_notes(child)
+        else:
+            yield child.path
+
+
+def filter_tree(root: Node, query: str, content_hits: Container[Path] = frozenset()) -> Node:
     """
     Retourne une copie élaguée de l'arbre ne contenant que les éléments dont le
-    nom correspond à `query` (insensible à la casse), ainsi que leurs parents.
+    nom correspond à `query` (insensible à la casse) ou dont le chemin figure dans
+    `content_hits` (notes dont le contenu correspond), ainsi que leurs parents.
     Si un dossier correspond, tout son contenu est conservé.
     """
     needle = query.strip().casefold()
@@ -83,7 +122,7 @@ def filter_tree(root: Node, query: str) -> Node:
     def walk(node: Node) -> Node | None:
         matches = needle in node.title.casefold()
         if not node.is_dir:
-            return node if matches else None
+            return node if matches or node.path in content_hits else None
         if matches:
             return node
         kept = [c for c in (walk(child) for child in node.children) if c]
@@ -103,6 +142,8 @@ class NoteStore:
         except OSError as e:
             raise StorageError(_("Impossible de créer {path} : {error}").format(
                 path=self.root, error=e)) from e
+        # Contenu des notes déjà lues par la recherche : chemin -> (date de modification, texte).
+        self._text_cache: dict[Path, tuple[int, str]] = {}
 
     def create_samples(self, samples: list[tuple[str, str]]) -> list[Path]:
         """Écrit les notes d'exemple (chemin relatif, contenu) sans écraser l'existant."""
@@ -159,6 +200,44 @@ class NoteStore:
         except OSError as e:
             raise StorageError(_("Lecture impossible : {error}").format(error=e)) from e
 
+    # ------------------------------------------------------------------ recherche plein texte
+
+    def search_contents(self, paths: Iterable[Path], query: str) -> dict[Path, Snippet]:
+        """
+        Notes de `paths` dont le CONTENU contient `query` (insensible à la casse),
+        avec un extrait autour de la première occurrence. Seules les notes modifiées
+        depuis la recherche précédente sont relues sur le disque.
+        """
+        needle = query.strip()
+        if not needle:
+            return {}
+        pattern = re.compile(re.escape(needle), re.IGNORECASE)
+        hits = {}
+        for path in paths:
+            text = self._cached_text(path)
+            if text is None:
+                continue
+            match = pattern.search(text)
+            if match:
+                hits[path] = make_snippet(text, match.start(), match.end())
+        return hits
+
+    def _cached_text(self, path: Path) -> str | None:
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            self._text_cache.pop(path, None)
+            return None
+        cached = self._text_cache.get(path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        self._text_cache[path] = (mtime, text)
+        return text
+
     # ------------------------------------------------------------------ écriture
 
     def write_note(self, path: Path, text: str) -> None:
@@ -194,6 +273,24 @@ class NoteStore:
         except OSError as e:
             raise StorageError(_("Création impossible : {error}").format(error=e)) from e
         return path
+
+    def import_note(self, src: Path, dest_folder: Path) -> Path:
+        """
+        Copie un fichier externe (.md / .txt) dans `dest_folder`, renommé en cas de
+        collision (« Plan 2.md »). Le fichier d'origine n'est pas modifié.
+        """
+        src = Path(src)
+        dest = self._resolve(dest_folder)
+        if not src.is_file() or src.suffix.lower() not in NOTE_EXTENSIONS:
+            raise StorageError(_("Seuls les fichiers .md et .txt peuvent être importés."))
+        if not dest.is_dir():
+            raise StorageError(_("La destination n'est pas un dossier."))
+        target = self._unique(dest, self._sanitize(src.stem), src.suffix)
+        try:
+            shutil.copy2(src, target)
+        except OSError as e:
+            raise StorageError(_("Importation impossible : {error}").format(error=e)) from e
+        return target
 
     def create_folder(self, parent: Path, name: str) -> Path:
         parent = self._resolve(parent)

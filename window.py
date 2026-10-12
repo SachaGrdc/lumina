@@ -8,15 +8,19 @@ Assemble les briques :
   * trash_view.py   page « Corbeille » de la sidebar
   * context_menu.py menus contextuels (Gtk.PopoverMenu)
   * dialogs.py      dialogues Adw.AlertDialog
-  * line_numbers.py numéros de ligne de l'éditeur
-  * dnd.py          glisser-déposer (mixin)
+  * tabs.py         onglets de l'éditeur (Adw.TabView / Adw.TabBar)
+  * editor.py       contenu d'un onglet : éditeur, sauvegarde automatique
+  * links.py        liens cliquables (Ctrl+clic)
+  * printing.py     impression / export PDF (Gtk.PrintOperation)
+  * dnd.py          glisser-déposer interne et import de fichiers (mixin)
 
 Actions de la fenêtre :
   sans paramètre   win.new-note · win.new-folder · win.rename (F2)
+                   win.new-tab · win.close-tab · win.print
                    win.focus-search · win.toggle-sidebar · win.empty-trash
   à état (booléen) win.show-trash   (page « Corbeille » de la sidebar)
-  avec chemin ("s") win.item-new-note · win.item-new-folder · win.item-pin
-                   win.item-rename · win.item-delete   (menu d'un élément)
+  avec chemin ("s") win.item-open-tab · win.item-new-note · win.item-new-folder
+                   win.item-pin · win.item-rename · win.item-delete (menu d'un élément)
                    win.trash-restore · win.trash-delete (menu de la corbeille)
 
 Les raccourcis sont déclarés dans main.py. « Suppr » n'est volontairement PAS un
@@ -27,6 +31,8 @@ le focus est dans la barre latérale.
 from pathlib import Path
 from typing import Callable
 
+import re
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -36,16 +42,24 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 from context_menu import build_item_menu, build_trash_menu, popup_menu  # noqa: E402
 from dialogs import ask_text, confirm  # noqa: E402
 from dnd import DragDropMixin  # noqa: E402
+from editor import NotePage  # noqa: E402
 from i18n import _  # noqa: E402
-from line_numbers import LineNumberGutter  # noqa: E402
 from pinned import PinnedSection  # noqa: E402
 from pins import PinStore  # noqa: E402
-from storage import Node, NoteStore, StorageError, TrashEntry, filter_tree  # noqa: E402
+from printing import print_note  # noqa: E402
+from storage import (Node, NoteStore, Snippet, StorageError, TrashEntry,  # noqa: E402
+                     filter_tree, iter_notes)
+from tabs import NoteTabs  # noqa: E402
 from trash_view import TrashView  # noqa: E402
 
-SAVE_DELAY_MS = 1000     # debouncing de la sauvegarde automatique
 UNDO_TIMEOUT_S = 8       # durée d'affichage du toast « Annuler »
-EDITOR_MARGIN = 40       # marge gauche de l'éditeur (réduite quand les numéros s'affichent)
+TRANSITION_MS = 220      # durée du fondu Notes / Corbeille de la barre latérale
+
+
+def _highlight(text: str, start: int, end: int) -> str:
+    """Balisage Pango de `text` avec text[start:end] en gras (occurrence recherchée)."""
+    esc = GLib.markup_escape_text
+    return f"{esc(text[:start])}<b>{esc(text[start:end])}</b>{esc(text[end:])}"
 
 
 class NoteItem(GObject.Object):
@@ -68,11 +82,7 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         self.store = store
         self.pins = PinStore(store.root)
 
-        # État de l'éditeur
-        self.current_path: Path | None = None
-        self._loading = False       # vrai pendant le chargement d'une note
-        self._dirty = False         # modifications non enregistrées
-        self._save_source = 0       # id du timeout de sauvegarde en attente
+        self._line_numbers = False
 
         # État de l'arbre
         self.tree_model: Gtk.TreeListModel | None = None
@@ -80,6 +90,8 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         self._model_filtered = False
         self._expanded: set[Path] = set()
         self._query = ""
+        self._scan_cache: Node | None = None   # dernier parcours du disque (réutilisé par la recherche)
+        self._snippets: dict[Path, Snippet] = {}  # recherche : extrait du contenu de chaque note trouvée
 
         self._init_dnd()
         self._build_ui()
@@ -111,6 +123,7 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
 
         menu = Gio.Menu()
         menu.append(_("Nouvelle note"), "win.new-note")
+        menu.append(_("Nouvel onglet"), "win.new-tab")
         menu.append(_("Nouveau dossier"), "win.new-folder")
         new_button = Gtk.MenuButton(icon_name="list-add-symbolic", menu_model=menu,
                                     tooltip_text=_("Nouveau"))
@@ -118,6 +131,9 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
 
         # Menu principal (F10)
         main_menu = Gio.Menu()
+        section = Gio.Menu()
+        section.append(_("Imprimer / Exporter en PDF…"), "win.print")
+        main_menu.append_section(None, section)
         section = Gio.Menu()
         section.append(_("Corbeille"), "win.show-trash")
         main_menu.append_section(None, section)
@@ -172,7 +188,8 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
 
         self.trash_view = TrashView(self.store.root, on_context=self._on_trash_context)
 
-        self.sidebar_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.sidebar_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE,
+                                       transition_duration=TRANSITION_MS)
         self.sidebar_stack.add_named(notes_page, "notes")
         self.sidebar_stack.add_named(self.trash_view, "trash")
 
@@ -201,53 +218,47 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         self.window_title = Adw.WindowTitle(title="Lumina", subtitle="")
         header.set_title_widget(self.window_title)
 
-        # Page « aucune note »
-        empty_button = Gtk.Button(label=_("Nouvelle note"), halign=Gtk.Align.CENTER,
-                                  action_name="win.new-note")
-        empty_button.add_css_class("suggested-action")
-        empty_button.add_css_class("pill")
-        empty = Adw.StatusPage(icon_name="document-edit-symbolic",
-                               title=_("Aucune note ouverte"),
-                               description=_("Sélectionnez une note dans la barre latérale "
-                                             "ou créez-en une nouvelle."),
-                               child=empty_button)
+        # Onglets : la barre n'apparaît qu'à partir de deux onglets. Il y a toujours
+        # au moins un onglet, une page blanche au départ.
+        self.tabs = NoteTabs(on_selected=self._on_tab_selected)
+        self.tabs.add(self._make_page())
 
-        # Page éditeur : TextView centré, sans bordure, avec de larges marges.
-        self.buffer = Gtk.TextBuffer()
-        self.buffer.connect("changed", self._on_buffer_changed)
-        self.text_view = Gtk.TextView(buffer=self.buffer, vexpand=True,
-                                      wrap_mode=Gtk.WrapMode.WORD_CHAR,
-                                      top_margin=40, bottom_margin=40,
-                                      left_margin=EDITOR_MARGIN, right_margin=40,
-                                      pixels_inside_wrap=4, pixels_below_lines=2)
-        self.text_view.add_css_class("lumina-editor")
-        self.gutter = LineNumberGutter(self.text_view)
-        clamp = Adw.Clamp(maximum_size=760, tightening_threshold=600,
-                          vexpand=True, child=self.text_view)
-        editor = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, child=clamp)
-
-        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
-        self.stack.add_named(empty, "empty")
-        self.stack.add_named(editor, "editor")
-        self.stack.set_visible_child_name("empty")
-
-        self.toast_overlay = Adw.ToastOverlay(child=self.stack)
+        self.toast_overlay = Adw.ToastOverlay(child=self.tabs.view)
         view = Adw.ToolbarView(content=self.toast_overlay)
         view.add_top_bar(header)
+        view.add_top_bar(self.tabs.bar)
         return view
+
+    def _make_page(self) -> NotePage:
+        page = NotePage(self.store, on_materialize=self._materialize_draft, on_error=self.toast)
+        page.set_line_numbers(self._line_numbers)
+        return page
 
     def set_line_numbers(self, enabled: bool):
         """Affiche ou masque les numéros de ligne de l'éditeur (préférences)."""
-        self.text_view.set_gutter(Gtk.TextWindowType.LEFT, self.gutter if enabled else None)
-        self.text_view.set_left_margin(12 if enabled else EDITOR_MARGIN)
+        self._line_numbers = enabled
+        for page in self.tabs.pages():
+            page.set_line_numbers(enabled)
+
+    @property
+    def current_page(self) -> NotePage:
+        return self.tabs.current
+
+    @property
+    def current_path(self) -> Path | None:
+        """Note de l'onglet actif (None pour une page blanche)."""
+        page = self.tabs.current
+        return page.path if page is not None else None
 
     # ================================================================== État (reconstruction)
 
     def export_state(self) -> dict:
         """État à transmettre à la fenêtre qui remplace celle-ci (langue / dossier changés)."""
         self._flush()
+        tabs, active = self.tabs.session()
         return {
-            "note": self.current_path,
+            "tabs": tabs,
+            "active_tab": active,
             "size": (self.get_width() or 1100, self.get_height() or 720),
             "maximized": self.is_maximized(),
             "sidebar": self.split_view.get_show_sidebar(),
@@ -259,21 +270,45 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         if state["maximized"]:
             self.maximize()
         self.split_view.set_show_sidebar(state["sidebar"])
-        note = state["note"]
-        if note is not None and note.is_file() and self.store.root in note.parents:
-            self.open_note(note)
-            self._reveal_in_tree(note)
+        self.restore_tabs(state["tabs"], state["active_tab"])
         if state["trash"]:
             self._show_trash(True)
+
+    def restore_tabs(self, tabs: list[dict], active: int = 0):
+        """
+        Ouverture : rouvre les onglets de la session précédente (note et position du
+        curseur), sinon une page blanche prête à être tapée. Les notes disparues
+        entre-temps sont ignorées.
+        """
+        entries = []
+        for tab in tabs:
+            path = Path(tab["path"])
+            if (path.is_file() and self.store.root in path.parents
+                    and path not in (p for p, _c in entries)):
+                entries.append((path, tab.get("cursor", 0)))
+
+        selected = self.tabs.current
+        for i, (path, cursor) in enumerate(entries):
+            page = self.tabs.current if i == 0 else self.tabs.add(self._make_page(), select=False)
+            if page.load(path):
+                page.restore_cursor(cursor)
+            if i == min(active, len(entries) - 1):
+                selected = page
+        self.tabs.sync_titles()
+        self.tabs.select(selected)
+        self._on_tab_selected(selected)  # même si l'onglet sélectionné n'a pas changé
 
     # ================================================================== Actions
 
     def _build_actions(self):
         # Actions sans paramètre : raccourcis clavier et boutons.
         for name, callback in (
-                ("new-note", lambda *_a: self._create_entry(False)),
-                ("new-folder", lambda *_a: self._create_entry(True)),
+                ("new-note", lambda *_a: self._new_note()),
+                ("new-folder", lambda *_a: self._new_folder()),
                 ("rename", lambda *_a: self._rename_path(self._keyboard_target())),
+                ("new-tab", lambda *_a: self._new_tab()),
+                ("close-tab", lambda *_a: self.tabs.close(self.current_page)),
+                ("print", self._on_print),
                 ("focus-search", self._on_focus_search),
                 ("toggle-sidebar", self._on_toggle_sidebar),
                 ("empty-trash", self._on_empty_trash)):
@@ -289,8 +324,9 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         self.add_action(show_trash)
 
         # Actions des menus contextuels : elles reçoivent le chemin de l'élément cliqué.
-        self._add_path_action("item-new-note", lambda p: self._create_entry(False, self._folder_of(p)))
-        self._add_path_action("item-new-folder", lambda p: self._create_entry(True, self._folder_of(p)))
+        self._add_path_action("item-open-tab", lambda p: self.open_note(p, new_tab=True))
+        self._add_path_action("item-new-note", lambda p: self._new_note(self._folder_of(p)))
+        self._add_path_action("item-new-folder", lambda p: self._new_folder(self._folder_of(p)))
         self._add_path_action("item-pin", self._toggle_pin)
         self._add_path_action("item-rename", self._rename_path)
         self._add_path_action("item-delete", self._trash_path)
@@ -365,9 +401,9 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def _on_stop_search(self, entry: Gtk.SearchEntry):
-        """Échap dans la recherche : vide le filtre et rend le focus à l'éditeur / la liste."""
+        """Échap dans la recherche : vide le filtre et rend le focus à l'éditeur."""
         entry.set_text("")
-        (self.text_view if self.current_path is not None else self.list_view).grab_focus()
+        self.current_page.text_view.grab_focus()
 
     # ================================================================== Menu contextuel
 
@@ -403,20 +439,27 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
     # ================================================================== Arbre
 
     def reload_tree(self, select_path: Path | None = None,
-                    expand_paths: set[Path] | None = None):
+                    expand_paths: set[Path] | None = None, rescan: bool = True):
         """
         Reconstruit entièrement le modèle (changement de filtre de recherche).
         Pour les modifications du disque, préférer `refresh_tree`, plus fluide.
+        `rescan=False` réutilise le dernier parcours du disque (frappe dans la recherche).
         """
         # Mémorise les dossiers ouverts (uniquement hors recherche : en recherche
         # tout est déplié automatiquement et ne doit pas polluer l'état).
         if self.tree_model is not None and not self._model_filtered:
             self._expanded = self._collect_expanded()
 
-        root = self.store.scan()
+        if rescan or self._scan_cache is None:
+            self._scan_cache = self.store.scan()
+        root = self._scan_cache
         filtered = bool(self._query)
         if filtered:
-            root = filter_tree(root, self._query)
+            # Titres ET contenu : seules les notes modifiées depuis la frappe précédente sont relues.
+            self._snippets = self.store.search_contents(iter_notes(root), self._query)
+            root = filter_tree(root, self._query, self._snippets)
+        else:
+            self._snippets = {}
 
         self.root_store = Gio.ListStore(item_type=NoteItem)
         for child in root.children:
@@ -439,7 +482,8 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         if target is not None:
             self._select_path(target)
         self._refresh_pins()
-        self._refresh_trash()
+        if rescan:
+            self._refresh_trash()
 
     def refresh_tree(self, select_path: Path | None = None,
                      expand_paths: set[Path] | None = None):
@@ -452,7 +496,8 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
             self.reload_tree(select_path, expand_paths)  # vue filtrée : reconstruction
             return
 
-        self._sync_store(self.root_store, self.store.scan().children)
+        self._scan_cache = self.store.scan()
+        self._sync_store(self.root_store, self._scan_cache.children)
 
         wanted = set(expand_paths or ())
         if select_path is not None:
@@ -546,7 +591,7 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
 
     def _reveal_in_tree(self, path: Path):
         """Déplie les dossiers parents de `path` puis le sélectionne dans l'arborescence."""
-        if self._model_filtered:
+        if self.tree_model is None or self._model_filtered:
             return
         self._expand_rows({p for p in path.parents if self.store.root in p.parents})
         self._select_path(path)
@@ -571,9 +616,17 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
     # --- fabrique de lignes
 
     def _on_factory_setup(self, _factory, list_item):
+        # Box[icône, Box[titre, extrait]] : l'extrait n'apparaît que pendant une recherche.
         box = Gtk.Box(spacing=8)
         box.append(Gtk.Image())
-        box.append(Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END))
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True,
+                        valign=Gtk.Align.CENTER)
+        texts.append(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END))
+        snippet = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, visible=False)
+        snippet.add_css_class("caption")
+        snippet.add_css_class("dim-label")
+        texts.append(snippet)
+        box.append(texts)
         expander = Gtk.TreeExpander(child=box)
         expander.add_css_class("lumina-row")
         list_item.set_child(expander)
@@ -586,9 +639,20 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         expander = list_item.get_child()
         expander.set_list_row(row)
         icon = expander.get_child().get_first_child()
-        label = icon.get_next_sibling()
+        label = icon.get_next_sibling().get_first_child()
+        snippet_label = label.get_next_sibling()
         icon.set_from_icon_name("folder-symbolic" if node.is_dir else "text-x-generic-symbolic")
-        label.set_text(node.title)
+
+        # Recherche : occurrence en gras dans le titre, extrait du contenu en dessous.
+        match = re.search(re.escape(self._query), node.title, re.IGNORECASE) if self._query else None
+        if match:
+            label.set_markup(_highlight(node.title, match.start(), match.end()))
+        else:
+            label.set_text(node.title)
+        snippet = self._snippets.get(node.path)
+        if snippet is not None:
+            snippet_label.set_markup(_highlight(snippet.text, snippet.start, snippet.end))
+        snippet_label.set_visible(snippet is not None)
 
     def _on_factory_unbind(self, _factory, list_item):
         expander = list_item.get_child()
@@ -610,8 +674,14 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         self._reveal_in_tree(path)
 
     def _on_search_changed(self, entry: Gtk.SearchEntry):
-        self._query = entry.get_text().strip()
-        self.reload_tree()
+        query = entry.get_text().strip()
+        if query == self._query:
+            return
+        self._flush()  # la recherche lit le disque : les onglets y sont d'abord enregistrés
+        self._query = query
+        # Pendant la frappe, on filtre le dernier parcours sans relire le disque ;
+        # en vidant la recherche, on se resynchronise avec le disque.
+        self.reload_tree(rescan=not query)
 
     # ================================================================== Épingles
 
@@ -631,16 +701,21 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
 
     # ================================================================== Création
 
-    def _create_entry(self, is_folder: bool, parent: Path | None = None):
+    def _new_note(self, parent: Path | None = None):
+        """Nouvelle note sans dialogue : une page blanche, créée sur le disque à la première frappe."""
+        if parent is None:
+            parent = self._folder_of(self._keyboard_target())
+        self._show_trash(False)
+        self._start_draft(parent)
+
+    def _new_folder(self, parent: Path | None = None):
+        """Nouveau dossier : seule création qui demande un nom."""
         if parent is None:
             parent = self._folder_of(self._keyboard_target())
 
         def on_name(name: str):
             try:
-                if is_folder:
-                    path = self.store.create_folder(parent, name)
-                else:
-                    path = self.store.create_note(parent, name)
+                path = self.store.create_folder(parent, name)
             except StorageError as e:
                 self.toast(str(e))
                 return
@@ -649,16 +724,14 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
                 self.search_entry.set_text("")
             self._show_trash(False)
             self.refresh_tree(select_path=path)
-            if not is_folder:
-                self.open_note(path)
 
         where = (_("Créé à la racine") if parent == self.store.root
                  else _("Créé dans : {folder}").format(
                      folder=parent.relative_to(self.store.root).as_posix()))
         ask_text(self,
-                 heading=_("Nouveau dossier") if is_folder else _("Nouvelle note"),
+                 heading=_("Nouveau dossier"),
                  body=where,
-                 default=_("Nouveau dossier") if is_folder else _("Sans titre"),
+                 default=_("Nouveau dossier"),
                  ok_label=_("Créer"),
                  on_ok=on_name)
 
@@ -693,19 +766,11 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
     # ================================================================== Corbeille
 
     def _trash_path(self, path: Path | None):
+        """Mise à la corbeille immédiate : elle est réversible (toast « Annuler », page
+        Corbeille), la confirmation est réservée aux suppressions définitives."""
         if path is None or path == self.store.root:
             return
-        is_dir = path.is_dir()
-        name = path.name if is_dir else path.stem
-        confirm(self,
-                heading=_("Mettre « {name} » à la corbeille ?").format(name=name),
-                body=(_("Le dossier et tout son contenu seront déplacés dans la corbeille.")
-                      if is_dir else _("La note sera déplacée dans la corbeille."))
-                     + " " + _("Vous pourrez la restaurer depuis la corbeille."),
-                ok_label=_("Mettre à la corbeille"),
-                on_ok=lambda: self._do_trash(path, name))
-
-    def _do_trash(self, path: Path, name: str):
+        name = path.name if path.is_dir() else path.stem
         self._flush()
         try:
             entry = self.store.move_to_trash(path)
@@ -713,9 +778,9 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
             self.toast(str(e))
             return
         unpinned = self.pins.remove_under(path)  # conservées pour pouvoir annuler
-        if self.current_path is not None and (
-                self.current_path == path or path in self.current_path.parents):
-            self._close_note()
+        for page in self.tabs.pages():  # ferme les onglets des notes mises à la corbeille
+            if page.is_under(path):
+                self.tabs.close(page)
         self.refresh_tree()
         self.toast(_("« {name} » mis à la corbeille").format(name=name),
                    undo=lambda: self._undo_trash(entry, unpinned))
@@ -810,95 +875,90 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
     # ================================================================== Suivi des chemins
 
     def _path_moved(self, old: Path, new: Path):
-        """À appeler après tout renommage / déplacement : éditeur et épingles suivent."""
-        self._remap_current(old, new)
+        """À appeler après tout renommage / déplacement : onglets et épingles suivent."""
+        for page in self.tabs.pages():
+            page.remap(old, new)
         self.pins.remap(old, new)
-        if self.current_path is not None:
-            self.window_title.set_title(self.current_path.stem)
+        self.tabs.sync_titles()
+        self.window_title.set_title(self.current_page.title)
 
-    def _remap_current(self, old: Path, new: Path):
-        """Si la note ouverte se trouvait dans `old`, suit son déplacement vers `new`."""
-        if self.current_path is None:
+    # ================================================================== Onglets et éditeur
+
+    def open_note(self, path: Path, new_tab: bool = False):
+        """
+        Ouvre `path` dans l'onglet actif (ou dans un nouvel onglet). Une note déjà
+        ouverte dans un onglet n'est pas dupliquée : on bascule simplement dessus.
+        """
+        existing = self.tabs.find(path)
+        if existing is not None:
+            self.tabs.select(existing)
+            self._focus_editor()
             return
-        try:
-            relative = self.current_path.relative_to(old)
-        except ValueError:
+        if new_tab:
+            page = self._make_page()
+            if page.load(path):
+                self.tabs.add(page)  # la sélection appelle _on_tab_selected
             return
-        self.current_path = new / relative
+        page = self.current_page
+        if page.load(path):  # la note précédente de l'onglet est d'abord enregistrée
+            self._on_tab_selected(page)
 
-    # ================================================================== Éditeur
+    def _new_tab(self):
+        """Ctrl+T : nouvel onglet avec une page blanche."""
+        page = self._make_page()
+        page.start_draft(self._folder_of(self._keyboard_target()))
+        self._show_trash(False)
+        self.tabs.add(page)
 
-    def open_note(self, path: Path):
-        self._flush()  # enregistre la note précédente avant d'en changer
+    def _start_draft(self, parent: Path):
+        """Page blanche dans l'onglet actif (la note précédente est enregistrée)."""
+        page = self.current_page
+        page.start_draft(parent)
+        self._on_tab_selected(page)
+
+    def _on_tab_selected(self, page: NotePage):
+        """Onglet actif changé (ou son contenu) : titre, épingles, arborescence, focus."""
+        self.tabs.sync_titles()
+        self.window_title.set_title(page.title)
+        self.pinned.set_current(page.path)
+        if page.path is not None:
+            self._reveal_in_tree(page.path)
+        else:
+            self.selection.unselect_all()
+        self._focus_editor()
+
+    def _materialize_draft(self, page: NotePage) -> bool:
+        """Première frappe dans une page blanche : crée sa note sur le disque."""
+        parent = page.draft_parent if page.draft_parent.is_dir() else self.store.root
         try:
-            text = self.store.read_note(path)
+            page.path = self.store.create_note(parent, _("Sans titre"))
         except StorageError as e:
             self.toast(str(e))
-            return
+            return False
+        self.tabs.sync_titles()
+        if page is self.current_page:
+            self.window_title.set_title(page.title)
+        self.refresh_tree(select_path=page.path)
+        return True
 
-        self._set_buffer_text(text)
-        self.current_path = path
-        self.window_title.set_title(path.stem)
-        self.window_title.set_subtitle("")
-        self.stack.set_visible_child_name("editor")
-        self.pinned.set_current(path)
-        self.text_view.grab_focus()
-
+    def _focus_editor(self):
+        # set_focus fonctionne aussi avant l'affichage de la fenêtre (au lancement).
+        self.set_focus(self.current_page.text_view)
         if self.split_view.get_collapsed():  # mode étroit : on révèle l'éditeur
             self.split_view.set_show_sidebar(False)
 
-    def _close_note(self):
-        """Revient à l'état vide (la note ouverte a été supprimée)."""
-        self._set_buffer_text("")
-        self.current_path = None
-        self.window_title.set_title("Lumina")
-        self.window_title.set_subtitle("")
-        self.stack.set_visible_child_name("empty")
-        self.pinned.set_current(None)
-
-    def _set_buffer_text(self, text: str):
-        self._loading = True
-        self.buffer.begin_irreversible_action()  # Ctrl+Z ne doit pas « décharger » la note
-        self.buffer.set_text(text)
-        self.buffer.place_cursor(self.buffer.get_start_iter())
-        self.buffer.end_irreversible_action()
-        self._loading = False
-        self._dirty = False
-
-    # --- sauvegarde automatique (debouncing)
-
-    def _on_buffer_changed(self, _buffer):
-        if self._loading or self.current_path is None:
-            return
-        self._dirty = True
-        self.window_title.set_subtitle(_("Modifications en cours…"))
-        # Chaque frappe relance le minuteur : on n'écrit qu'après 1 s d'inactivité.
-        if self._save_source:
-            GLib.source_remove(self._save_source)
-        self._save_source = GLib.timeout_add(SAVE_DELAY_MS, self._on_save_timeout)
-
-    def _on_save_timeout(self):
-        self._save_source = 0
-        self._flush()
-        return GLib.SOURCE_REMOVE
-
     def _flush(self):
-        """Enregistre immédiatement si nécessaire (changement de note, fermeture…)."""
-        if self._save_source:
-            GLib.source_remove(self._save_source)
-            self._save_source = 0
-        if not self._dirty or self.current_path is None:
-            return
-        text = self.buffer.get_text(self.buffer.get_start_iter(),
-                                    self.buffer.get_end_iter(), False)
-        try:
-            self.store.write_note(self.current_path, text)
-        except StorageError as e:
-            self.toast(str(e))
-            return
-        self._dirty = False
-        self.window_title.set_subtitle(_("Enregistré"))
+        """Enregistre immédiatement tous les onglets modifiés (déplacement, fermeture…)."""
+        for page in self.tabs.pages():
+            page.flush()
+
+    def _on_print(self, *_args):
+        page = self.current_page
+        print_note(self, page.title, page.text(), on_error=self.toast)
 
     def _on_close_request(self, _window):
         self._flush()
+        # Mémorise les onglets ouverts : ils seront rouverts au prochain lancement.
+        self.get_application().save_session(*self.tabs.session())
         return False  # laisse la fenêtre se fermer
+

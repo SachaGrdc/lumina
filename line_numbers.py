@@ -72,16 +72,20 @@ class LineNumberGutter(Gtk.Widget):
 
     def do_snapshot(self, snapshot):
         view = self._view
-        buffer = view.get_buffer()
         color = (self.get_color() if hasattr(self, "get_color")  # GTK >= 4.10
                  else self.get_style_context().get_color())
         width = self.get_width()
         layout = self.create_pango_layout("")
         point = Graphene.Point()
 
-        it = buffer.get_start_iter()
+        # Seules les lignes visibles sont dessinées : coût constant, même pour une longue note.
+        visible = view.get_visible_rect()
+        it, _top = view.get_line_at_y(visible.y)
+        bottom = visible.y + visible.height
         while True:
             y, _height = view.get_line_yrange(it)
+            if y > bottom:
+                break
             _x, wy = view.buffer_to_window_coords(Gtk.TextWindowType.LEFT, 0, y)
             layout.set_text(str(it.get_line() + 1), -1)
             text_width, _text_height = layout.get_pixel_size()

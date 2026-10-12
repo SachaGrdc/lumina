@@ -9,7 +9,11 @@ raccourcis et choisit la première fenêtre (accueil ou fenêtre principale).
   window.py        fenêtre principale, assemble les modules ci-dessous
   onboarding.py    écran d'accueil du premier lancement
   preferences.py   fenêtre de préférences
-  dnd.py           glisser-déposer dans la barre latérale
+  tabs.py          onglets de l'éditeur (Adw.TabView / Adw.TabBar)
+  editor.py        contenu d'un onglet : éditeur, sauvegarde automatique
+  links.py         liens cliquables (Ctrl+clic)
+  printing.py      impression / export PDF (Gtk.PrintOperation)
+  dnd.py           glisser-déposer dans la barre latérale, import de fichiers
   pinned.py        section « Épinglées »
   trash_view.py    page « Corbeille »
   context_menu.py  menus contextuels (clic droit)
@@ -59,6 +63,9 @@ ACCELERATORS = {
     "win.focus-search": ["<Primary>f"],
     "win.toggle-sidebar": ["<Primary>backslash", "<Primary>b", "F9"],
     "win.rename": ["F2"],
+    "win.new-tab": ["<Primary>t"],
+    "win.close-tab": ["<Primary>w"],
+    "win.print": ["<Primary>p"],
     "app.preferences": ["<Primary>comma"],
 }
 
@@ -112,6 +119,8 @@ class LuminaApp(Adw.Application):
         win.set_line_numbers(self.config.line_numbers)
         if state is not None:
             win.restore_state(state)
+        else:  # onglets de la session précédente (curseur compris), ou une page blanche
+            win.restore_tabs(self.config.tabs, self.config.active_tab)
         win.present()
         return win
 
@@ -151,7 +160,7 @@ class LuminaApp(Adw.Application):
         old = self.main_window()
         state = old.export_state() if old is not None else None
         if state is not None and old.store.root != Path(self.config.notes_dir).expanduser().resolve():
-            state["note"] = None  # la note ouverte n'appartient pas au nouveau dossier
+            state["tabs"] = []  # les notes ouvertes n'appartiennent pas au nouveau dossier
         new = self._open_main(state)
         if old is not None:
             old.destroy()
@@ -174,6 +183,14 @@ class LuminaApp(Adw.Application):
         if window is self._prefs:
             self._prefs = None
         return False
+
+    def save_session(self, tabs: list[dict], active: int):
+        """Onglets ouverts à la fermeture de la fenêtre (rouverts au prochain lancement)."""
+        self.config.tabs, self.config.active_tab = tabs, active
+        try:
+            self.config.save()
+        except OSError:
+            pass  # la fenêtre se ferme : rien à afficher, la session est simplement perdue
 
     def update_setting(self, key: str, value: Any):
         """Enregistre une préférence dans config.json puis l'applique."""
