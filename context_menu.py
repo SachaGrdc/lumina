@@ -22,29 +22,43 @@ def _item(label: str, action: str, path: Path) -> Gio.MenuItem:
     return item
 
 
-def build_item_menu(path: Path, is_dir: bool, is_pinned: bool) -> Gio.Menu:
-    """Construit le menu d'un élément de l'arborescence ou des épingles."""
+def _section(menu: Gio.Menu, *items: Gio.MenuItem) -> None:
+    section = Gio.Menu()
+    for item in items:
+        section.append_item(item)
+    menu.append_section(None, section)
+
+
+def build_empty_menu(root: Path) -> Gio.Menu:
+    """Clic droit sur la zone vide de la barre latérale : création à la racine."""
     menu = Gio.Menu()
+    _section(menu,
+             _item(_("Nouvelle note…"), "item-new-note", root),
+             _item(_("Nouveau dossier…"), "item-new-folder", root))
+    return menu
 
-    if not is_dir:
-        open_section = Gio.Menu()
-        open_section.append_item(_item(_("Ouvrir dans un nouvel onglet"), "item-open-tab", path))
-        menu.append_section(None, open_section)
 
-    create = Gio.Menu()
-    create.append_item(_item(_("Nouvelle note"), "item-new-note", path))
-    create.append_item(_item(_("Nouveau dossier"), "item-new-folder", path))
-    menu.append_section(None, create)
-
-    edit = Gio.Menu()
-    if not is_dir:
-        edit.append_item(_item(_("Désépingler") if is_pinned else _("Épingler"), "item-pin", path))
-    edit.append_item(_item(_("Renommer…"), "item-rename", path))
-    menu.append_section(None, edit)
-
-    danger = Gio.Menu()
-    danger.append_item(_item(_("Mettre à la corbeille"), "item-delete", path))
-    menu.append_section(None, danger)
+def build_item_menu(path: Path, is_dir: bool, is_pinned: bool) -> Gio.Menu:
+    """
+    Menu d'un élément de l'arborescence ou des épingles :
+      dossier : Nouvelle note ici · Nouveau dossier ici | Renommer | Supprimer
+      note    : Ouvrir dans un nouvel onglet | Épingler · Renommer | Supprimer
+    « Supprimer » met à la corbeille (annulable) ; la suppression définitive se
+    fait depuis la corbeille.
+    """
+    menu = Gio.Menu()
+    rename = _item(_("Renommer…"), "item-rename", path)
+    if is_dir:
+        _section(menu,
+                 _item(_("Nouvelle note ici…"), "item-new-note", path),
+                 _item(_("Nouveau dossier ici…"), "item-new-folder", path))
+        _section(menu, rename)
+    else:
+        _section(menu, _item(_("Ouvrir dans un nouvel onglet"), "item-open-tab", path))
+        _section(menu,
+                 _item(_("Désépingler") if is_pinned else _("Épingler"), "item-pin", path),
+                 rename)
+    _section(menu, _item(_("Supprimer"), "item-delete", path))
     return menu
 
 

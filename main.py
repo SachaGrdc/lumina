@@ -13,14 +13,14 @@ raccourcis et choisit la première fenêtre (accueil ou fenêtre principale).
   editor.py        contenu d'un onglet : éditeur, sauvegarde automatique
   links.py         liens cliquables (Ctrl+clic)
   printing.py      impression / export PDF (Gtk.PrintOperation)
-  dnd.py           glisser-déposer dans la barre latérale, import de fichiers
+  sidebar.py       barre latérale : arborescence, recherche, menus, glisser-déposer
   pinned.py        section « Épinglées »
   trash_view.py    page « Corbeille »
   context_menu.py  menus contextuels (clic droit)
   dialogs.py       dialogues (renommer, confirmer, choisir un dossier)
   line_numbers.py  numéros de ligne de l'éditeur
   styles.py        feuille de style CSS, thème, taille du texte
-  storage.py       fichiers, dossiers, corbeille   — logique métier, sans GTK
+  storage.py       StorageManager : fichiers, dossiers, corbeille — sans GTK
   pins.py          notes épinglées                 — logique métier, sans GTK
   config.py        config.json                     — logique métier, sans GTK
   i18n.py          traductions (français / anglais) — sans GTK
@@ -48,7 +48,7 @@ from i18n import _  # noqa: E402
 from onboarding import OnboardingWindow  # noqa: E402
 from preferences import PreferencesWindow  # noqa: E402
 from samples import samples_for  # noqa: E402
-from storage import NoteStore, StorageError  # noqa: E402
+from storage import StorageError, StorageManager  # noqa: E402
 from styles import apply_theme, install_css, set_editor_font_size  # noqa: E402
 from window import LuminaWindow  # noqa: E402
 
@@ -132,7 +132,7 @@ class LuminaApp(Adw.Application):
 
     def _open_main(self, state: dict | None = None) -> LuminaWindow | None:
         try:
-            store = NoteStore(self.config.notes_dir)
+            store = StorageManager(self.config.notes_dir)
         except StorageError as e:  # dossier inaccessible : on repasse par l'accueil
             self._show_onboarding(str(e))
             return None
@@ -155,7 +155,7 @@ class LuminaApp(Adw.Application):
     def _finish_onboarding(self, folder: Path, create_samples: bool) -> str | None:
         """Appelé par « Commencer » ; retourne un message d'erreur, ou None si tout va bien."""
         try:
-            store = NoteStore(folder)
+            store = StorageManager(folder)
             if create_samples:
                 store.create_samples(samples_for(i18n.current_language()))
         except StorageError as e:
@@ -243,11 +243,41 @@ class LuminaApp(Adw.Application):
             GLib.idle_add(self._rebuild_main_window, True)
 
 
+def install_excepthook(app: LuminaApp) -> None:
+    """
+    Filet de sécurité. PyGObject transmet à sys.excepthook toute exception levée
+    dans un gestionnaire de signal ou une action GTK : elle est journalisée en
+    entier dans le terminal et signalée par un toast, et la boucle d'événements
+    continue. (Les erreurs prévues du disque sont des StorageError, déjà affichées
+    proprement là où elles se produisent.)
+    """
+    def hook(exc_type, exc, tb):
+        sys.__excepthook__(exc_type, exc, tb)
+        if issubclass(exc_type, KeyboardInterrupt):
+            return
+        win = app.main_window()
+        if win is None:
+            return
+
+        def show():
+            try:
+                win.toast(_("Erreur inattendue : {error}").format(error=exc))
+            except Exception:  # noqa: BLE001 — jamais d'exception depuis le filet lui-même
+                pass
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(show)
+
+    sys.excepthook = hook
+
+
 def main() -> int:
     # Sinon le nom du programme serait « main.py » (classe de fenêtre X11, gestion des sessions).
     GLib.set_prgname(APP_ID)
     GLib.set_application_name("Lumina")
-    return LuminaApp().run(sys.argv)
+    app = LuminaApp()
+    install_excepthook(app)
+    return app.run(sys.argv)
 
 
 if __name__ == "__main__":

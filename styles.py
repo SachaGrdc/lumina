@@ -28,7 +28,19 @@ textview.lumina-editor border {          /* marge du TextView qui accueille la g
     font-feature-settings: "tnum";
 }
 
-/* ---- Glisser-déposer : retours visuels (couleurs d'accent Libadwaita) ---- */
+/* ---- Glisser-déposer : retours visuels (couleurs d'accent Libadwaita) ----
+   GTK donne l'état :drop(active) à tout widget dont la cible accepte le dépôt
+   survolé, et le thème le dessine (cadre d'accent). Il est neutralisé sur nos
+   cibles : le seul retour visuel est celui des classes ci-dessous, posées
+   exactement sur l'élément visé. */
+.lumina-row:drop(active),
+.lumina-root-zone:drop(active),
+.lumina-editor-zone:drop(active),
+row:drop(active) {
+    box-shadow: none;
+    outline-color: transparent;   /* (pas « outline: none » : .lumina-drop-* rétablit la couleur) */
+    background-image: none;
+}
 .lumina-row {
     border-radius: 8px;
     outline: 2px solid transparent;

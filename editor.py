@@ -19,7 +19,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 from i18n import _  # noqa: E402
 from line_numbers import LineNumberGutter  # noqa: E402
 from links import LinkSupport  # noqa: E402
-from storage import NoteStore, StorageError  # noqa: E402
+from storage import StorageError, StorageManager  # noqa: E402
 
 SAVE_DELAY_MS = 1000     # debouncing de la sauvegarde automatique
 EDITOR_MARGIN = 40       # marges de l'éditeur (la gauche est réduite quand les numéros s'affichent)
@@ -28,7 +28,7 @@ EDITOR_MARGIN = 40       # marges de l'éditeur (la gauche est réduite quand le
 class NotePage(Gtk.ScrolledWindow):
     __gtype_name__ = "LuminaNotePage"
 
-    def __init__(self, store: NoteStore,
+    def __init__(self, store: StorageManager,
                  on_materialize: Callable[["NotePage"], bool],
                  on_error: Callable[[str], None]):
         super().__init__(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)

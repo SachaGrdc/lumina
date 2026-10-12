@@ -29,9 +29,12 @@ def _make_dialog(parent: Gtk.Window, heading: str, body: str):
 
 def ask_text(parent: Gtk.Window, heading: str, body: str, default: str,
              ok_label: str, on_ok: Callable[[str], None]) -> None:
-    """Demande un texte (nom de note / dossier) ; `on_ok` reçoit la saisie."""
+    """
+    Demande un texte (nom de note / dossier) ; `on_ok` reçoit la saisie, jamais
+    vide : le bouton de validation est désactivé tant que le champ l'est.
+    """
     entry = Gtk.Entry(text=default, activates_default=True)
-    entry.connect("map", lambda w: w.grab_focus())
+    entry.connect("map", lambda w: w.grab_focus())  # le texte proposé est sélectionné
 
     dialog, show = _make_dialog(parent, heading, body)
     dialog.set_extra_child(entry)
@@ -41,9 +44,16 @@ def ask_text(parent: Gtk.Window, heading: str, body: str, default: str,
     dialog.set_default_response("ok")
     dialog.set_close_response("cancel")
 
+    def update_ok(_entry=None):
+        dialog.set_response_enabled("ok", bool(entry.get_text().strip()))
+
+    entry.connect("changed", update_ok)
+    update_ok()
+
     def on_response(_dialog, response):
-        if response == "ok":
-            on_ok(entry.get_text())
+        text = entry.get_text().strip()
+        if response == "ok" and text:
+            on_ok(text)
 
     dialog.connect("response", on_response)
     show()
