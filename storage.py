@@ -37,7 +37,9 @@ from i18n import _
 
 NOTE_EXTENSIONS = (".md", ".txt")
 DEFAULT_EXTENSION = ".md"
-DEFAULT_ROOT = Path.home() / "LuminaNotes"
+# Dans un snap, Path.home() désigne ~/snap/lumina/<révision> : les notes vont
+# dans le vrai dossier personnel ($SNAP_REAL_HOME, accessible via l'interface home).
+DEFAULT_ROOT = Path(os.environ.get("SNAP_REAL_HOME") or Path.home()) / "LuminaNotes"
 TRASH_DIR = ".trash"                  # caché (commence par un point) : absent de l'arborescence
 TRASH_INDEX = ".lumina-trash.json"    # nom dans .trash -> emplacement d'origine et date
 MAX_NAME_LENGTH = 200

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Lanceur de Lumina dans le snap (installé en $SNAP/bin/lumina).
+# L'extension gnome (desktop-launch) a déjà préparé GTK4, Libadwaita,
+# GI_TYPELIB_PATH, XDG_DATA_DIRS et LD_LIBRARY_PATH avant d'arriver ici.
+set -e
+
+# PyGObject (python3-gi, python3-gi-cairo) est embarqué dans le snap.
+export PYTHONPATH="$SNAP/usr/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+
+# Python embarqué s'il a été inclus, sinon celui de la base core24.
+if [ -x "$SNAP/usr/bin/python3" ]; then
+    PYTHON="$SNAP/usr/bin/python3"
+else
+    PYTHON=python3
+fi
+
+exec "$PYTHON" "$SNAP/lumina/main.py" "$@"

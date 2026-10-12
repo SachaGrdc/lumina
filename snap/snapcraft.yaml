@@ -1,0 +1,71 @@
+name: lumina
+title: Lumina
+version: '1.0.0'
+summary: Éditeur de notes Markdown natif et épuré pour GNOME
+description: |
+  Lumina est un éditeur de notes minimaliste basé sur GTK4 et Libadwaita avec
+  support du Markdown, organisation par dossiers et recherche globale.
+license: GPL-3.0-only
+website: https://github.com/SachaGrdc/lumina
+source-code: https://github.com/SachaGrdc/lumina
+issues: https://github.com/SachaGrdc/lumina/issues
+contact: sacha.grandcolas06@gmail.com
+grade: stable
+base: core24
+confinement: strict
+
+apps:
+  lumina:
+    command: bin/lumina
+    desktop: usr/share/applications/com.github.lumina.desktop
+    common-id: com.github.lumina
+    # Embarque le runtime GNOME (GTK4, Libadwaita, portails, thèmes, polices).
+    extensions: [ gnome ]
+    plugs: [ home, desktop, desktop-legacy, gsettings, wayland, x11 ]
+
+# Gtk.Application s'enregistre sur le bus de session sous son App ID :
+# en confinement strict, ce nom doit être déclaré.
+slots:
+  lumina-dbus:
+    interface: dbus
+    bus: session
+    name: com.github.lumina
+
+parts:
+  lumina:
+    plugin: nil
+    source: .
+    # PyGObject (+ pont Cairo pour l'impression). GTK4/Libadwaita viennent de l'extension gnome.
+    stage-packages:
+      - python3-gi
+      - python3-gi-cairo
+    override-build: |
+      APP_ID=com.github.lumina
+      SHARE="$CRAFT_PART_INSTALL/usr/share"
+
+      # Code source Python
+      install -d "$CRAFT_PART_INSTALL/lumina"
+      install -m 644 ./*.py "$CRAFT_PART_INSTALL/lumina/"
+      chmod 755 "$CRAFT_PART_INSTALL/lumina/main.py"
+
+      # Exécutable de lancement
+      install -Dm 755 snap/local/lumina-launcher "$CRAFT_PART_INSTALL/bin/lumina"
+
+      # Lanceur .desktop : icône par chemin absolu dans le snap, sans TryExec
+      # (Exec=lumina est réécrit par snapd vers /snap/bin/lumina).
+      install -d "$SHARE/applications"
+      sed -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/com.github.lumina.svg|' \
+          -e '/^TryExec=/d' \
+          -e '/^# Modèle/d' \
+          "$APP_ID.desktop" > "$SHARE/applications/$APP_ID.desktop"
+
+      # Icône et métadonnées AppStream
+      install -Dm 644 "data/icons/hicolor/scalable/apps/$APP_ID.svg" \
+          "$SHARE/icons/hicolor/scalable/apps/$APP_ID.svg"
+      install -Dm 644 "data/$APP_ID.metainfo.xml" "$SHARE/metainfo/$APP_ID.metainfo.xml"
+    prime:
+      # GLib est fournie par le runtime GNOME : on ne garde pas la copie tirée par python3-gi.
+      - -usr/lib/*/libglib-2.0.so*
+      - -usr/lib/*/libgobject-2.0.so*
+      - -usr/lib/*/libgio-2.0.so*
+      - -usr/lib/*/libgmodule-2.0.so*

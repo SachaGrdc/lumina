@@ -49,7 +49,7 @@ case "$SRC_DIR" in
 esac
 
 mkdir -p "$APPS_DIR" "$ICON_DIR"
-install -m 644 "$SRC_DIR/data/$APP_ID.svg" "$ICON"
+install -m 644 "$SRC_DIR/data/icons/hicolor/scalable/apps/$APP_ID.svg" "$ICON"
 
 # Chemin absolu de main.py, entre guillemets (il peut contenir des espaces).
 MAIN=$(printf '%s' "$SRC_DIR/main.py" | sed 's/[&|]/\\&/g')

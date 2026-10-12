@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Métadonnées AppStream de Lumina (logithèques : GNOME Logiciels, App Center…). -->
+<component type="desktop-application">
+  <id>com.github.lumina</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+
+  <name>Lumina</name>
+  <summary>Minimalist Markdown notes</summary>
+  <summary xml:lang="fr">Éditeur de notes Markdown natif et épuré pour GNOME</summary>
+
+  <description>
+    <p>
+      Lumina is a minimalist note editor built with GTK4 and Libadwaita, with
+      Markdown support, folder organization and global search.
+    </p>
+    <p xml:lang="fr">
+      Lumina est un éditeur de notes minimaliste basé sur GTK4 et Libadwaita
+      avec support du Markdown, organisation par dossiers et recherche globale.
+    </p>
+    <ul>
+      <li>Markdown notes stored as plain files</li>
+      <li xml:lang="fr">Notes Markdown enregistrées en fichiers ordinaires</li>
+      <li>Folders, pinned notes and trash</li>
+      <li xml:lang="fr">Dossiers, notes épinglées et corbeille</li>
+      <li>Global search across all notes</li>
+      <li xml:lang="fr">Recherche globale dans toutes les notes</li>
+    </ul>
+  </description>
+
+  <url type="homepage">https://github.com/SachaGrdc/lumina</url>
+  <url type="bugtracker">https://github.com/SachaGrdc/lumina/issues</url>
+  <url type="vcs-browser">https://github.com/SachaGrdc/lumina</url>
+
+  <launchable type="desktop-id">com.github.lumina.desktop</launchable>
+
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+  </categories>
+
+  <keywords>
+    <keyword>notes</keyword>
+    <keyword>markdown</keyword>
+    <keyword>editor</keyword>
+  </keywords>
+
+  <provides>
+    <binary>lumina</binary>
+    <mediatype>text/markdown</mediatype>
+  </provides>
+
+  <developer id="com.github.lumina">
+    <name>SachaGrdc</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.0.0" date="2026-10-12">
+      <description>
+        <p>First release.</p>
+        <p xml:lang="fr">Première version.</p>
+      </description>
+    </release>
+  </releases>
+</component>

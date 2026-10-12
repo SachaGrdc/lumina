@@ -3,3 +3,10 @@ __pycache__/
 .venv/
 .idea/
 .vscode/
+
+# Construction Snap
+*.snap
+.snapcraft/
+parts/
+stage/
+prime/
