@@ -40,7 +40,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib  # noqa: E402
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 import i18n  # noqa: E402
 from config import Config  # noqa: E402
@@ -52,7 +52,9 @@ from storage import NoteStore, StorageError  # noqa: E402
 from styles import apply_theme, install_css, set_editor_font_size  # noqa: E402
 from window import LuminaWindow  # noqa: E402
 
-APP_ID = "dev.lumina.Notes"
+# Doit correspondre au nom du fichier .desktop et de l'icône : c'est ainsi que GNOME
+# associe la fenêtre à son lanceur (dock, Alt+Tab).
+APP_ID = "com.github.lumina"
 
 # Raccourcis globaux. « Suppr » n'y figure pas : il agit seulement dans la barre
 # latérale (voir window.py) pour ne pas effacer de texte dans l'éditeur.
@@ -63,6 +65,7 @@ ACCELERATORS = {
     "win.focus-search": ["<Primary>f"],
     "win.toggle-sidebar": ["<Primary>backslash", "<Primary>b", "F9"],
     "win.rename": ["F2"],
+    "win.save": ["<Primary>s"],   # facultatif : la sauvegarde est automatique
     "win.new-tab": ["<Primary>t"],
     "win.close-tab": ["<Primary>w"],
     "win.print": ["<Primary>p"],
@@ -72,16 +75,19 @@ ACCELERATORS = {
 
 class LuminaApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        # HANDLES_OPEN : « Ouvrir avec Lumina » (gestionnaire de fichiers, fichier .desktop).
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN)
         self.config = Config()
         self.first_run = False
         self._prefs: PreferencesWindow | None = None
+        self._pending_files: list[Path] = []   # reçus pendant l'écran d'accueil
 
     def do_startup(self):
         Adw.Application.do_startup(self)
         self.config, self.first_run = Config.load()
         i18n.set_language(self.config.language)
 
+        Gtk.Window.set_default_icon_name(APP_ID)
         install_css()
         apply_theme(self.config.theme)
         set_editor_font_size(self.config.font_size)
@@ -100,6 +106,21 @@ class LuminaApp(Adw.Application):
             self._show_onboarding()
         else:
             self._open_main()
+
+    def do_open(self, files, _n_files, _hint):
+        """Fichiers passés en argument (Ouvrir avec…) : ouverts chacun dans un onglet."""
+        paths = [Path(f.get_path()) for f in files if f.get_path() is not None]
+        win = self.main_window()
+        if win is None and self.first_run:  # ouverts une fois l'accueil terminé
+            self._pending_files.extend(paths)
+            self.activate()
+            return
+        if win is None:
+            win = self._open_main()
+            if win is None:
+                return
+        win.open_files(paths)
+        win.present()
 
     # ================================================================== Fenêtres
 
@@ -147,7 +168,10 @@ class LuminaApp(Adw.Application):
         self.first_run = False
 
         onboarding = self.props.active_window
-        self._open_main()  # avant de fermer l'accueil : l'application resterait sans fenêtre
+        win = self._open_main()  # avant de fermer l'accueil : l'application resterait sans fenêtre
+        if win is not None and self._pending_files:
+            win.open_files(self._pending_files)
+        self._pending_files = []
         if isinstance(onboarding, OnboardingWindow):
             onboarding.destroy()
         return None
@@ -220,6 +244,9 @@ class LuminaApp(Adw.Application):
 
 
 def main() -> int:
+    # Sinon le nom du programme serait « main.py » (classe de fenêtre X11, gestion des sessions).
+    GLib.set_prgname(APP_ID)
+    GLib.set_application_name("Lumina")
     return LuminaApp().run(sys.argv)
 
 

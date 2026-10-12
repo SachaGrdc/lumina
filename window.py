@@ -15,7 +15,7 @@ Assemble les briques :
   * dnd.py          glisser-déposer interne et import de fichiers (mixin)
 
 Actions de la fenêtre :
-  sans paramètre   win.new-note · win.new-folder · win.rename (F2)
+  sans paramètre   win.new-note · win.new-folder · win.rename (F2) · win.save
                    win.new-tab · win.close-tab · win.print
                    win.focus-search · win.toggle-sidebar · win.empty-trash
   à état (booléen) win.show-trash   (page « Corbeille » de la sidebar)
@@ -306,6 +306,7 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
                 ("new-note", lambda *_a: self._new_note()),
                 ("new-folder", lambda *_a: self._new_folder()),
                 ("rename", lambda *_a: self._rename_path(self._keyboard_target())),
+                ("save", lambda *_a: self._flush()),   # Ctrl+S, facultatif et silencieux
                 ("new-tab", lambda *_a: self._new_tab()),
                 ("close-tab", lambda *_a: self.tabs.close(self.current_page)),
                 ("print", self._on_print),
@@ -902,6 +903,24 @@ class LuminaWindow(DragDropMixin, Adw.ApplicationWindow):
         page = self.current_page
         if page.load(path):  # la note précédente de l'onglet est d'abord enregistrée
             self._on_tab_selected(page)
+
+    def open_files(self, paths: list[Path]):
+        """
+        Fichiers reçus du système (Ouvrir avec…). Une note du dossier de notes est
+        ouverte telle quelle ; un fichier situé ailleurs y est d'abord copié, comme
+        par glisser-déposer. Chaque fichier a son onglet (la page blanche est réutilisée).
+        """
+        for path in paths:
+            path = path.resolve()
+            if self.store.root not in path.parents:
+                try:
+                    path = self.store.import_note(path, self.store.root)
+                except StorageError as e:
+                    self.toast(str(e))
+                    continue
+                self.refresh_tree()
+                self.toast(_("« {name} » importé").format(name=path.stem))
+            self.open_note(path, new_tab=self.current_page.path is not None)
 
     def _new_tab(self):
         """Ctrl+T : nouvel onglet avec une page blanche."""

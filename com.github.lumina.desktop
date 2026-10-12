@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Lumina
+GenericName=Notes
+GenericName[fr]=Notes
+Comment=Minimalist Markdown notes
+Comment[fr]=Prise de notes Markdown minimaliste
+# Modèle : install.sh remplace « lumina » par le chemin absolu de main.py.
+Exec=lumina %F
+TryExec=python3
+Icon=com.github.lumina
+Terminal=false
+StartupNotify=true
+Categories=Utility;TextEditor;Office;
+MimeType=text/markdown;text/plain;
+Keywords=notes;markdown;text;editor;
+Keywords[fr]=notes;markdown;texte;éditeur;

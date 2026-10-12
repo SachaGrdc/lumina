@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd166"/>
+      <stop offset="1" stop-color="#f4a340"/>
+    </linearGradient>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f3f1ec"/>
+    </linearGradient>
+  </defs>
+  <!-- fond arrondi, avec une base plus sombre (style des icônes GNOME) -->
+  <rect x="12" y="16" width="104" height="100" rx="20" fill="#d9822b"/>
+  <rect x="12" y="12" width="104" height="100" rx="20" fill="url(#bg)"/>
+  <!-- page -->
+  <rect x="34" y="26" width="60" height="74" rx="6" fill="#000" opacity="0.12"/>
+  <rect x="34" y="24" width="60" height="74" rx="6" fill="url(#page)"/>
+  <!-- lignes de texte -->
+  <g stroke="#c9c3b8" stroke-width="4" stroke-linecap="round">
+    <line x1="44" y1="42" x2="84" y2="42"/>
+    <line x1="44" y1="54" x2="84" y2="54"/>
+    <line x1="44" y1="66" x2="72" y2="66"/>
+  </g>
+  <!-- étincelle « lumière » -->
+  <path d="M80 70 L84 80 L94 84 L84 88 L80 98 L76 88 L66 84 L76 80 Z" fill="#f4a340"/>
+</svg>
