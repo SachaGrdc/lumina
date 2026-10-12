@@ -7,7 +7,8 @@ raccourcis et choisit la première fenêtre (accueil ou fenêtre principale).
 
   main.py          application, préférences, raccourcis clavier  (ce fichier)
   window.py        fenêtre principale, assemble les modules ci-dessous
-  onboarding.py    écran d'accueil du premier lancement
+  welcome.py       dialogue d'accueil (une seule fois : config.welcome_shown)
+  onboarding.py    choix du dossier des notes au premier lancement
   preferences.py   fenêtre de préférences
   tabs.py          onglets de l'éditeur (Adw.TabView / Adw.TabBar)
   editor.py        contenu d'un onglet : éditeur, sauvegarde automatique
@@ -50,6 +51,7 @@ from preferences import PreferencesWindow  # noqa: E402
 from samples import samples_for  # noqa: E402
 from storage import StorageError, StorageManager  # noqa: E402
 from styles import apply_theme, install_css, set_editor_font_size  # noqa: E402
+from welcome import show_welcome  # noqa: E402
 from window import LuminaWindow  # noqa: E402
 
 # Doit correspondre au nom du fichier .desktop et de l'icône : c'est ainsi que GNOME
@@ -81,6 +83,7 @@ class LuminaApp(Adw.Application):
         self.first_run = False
         self._prefs: PreferencesWindow | None = None
         self._pending_files: list[Path] = []   # reçus pendant l'écran d'accueil
+        self._welcome: Gtk.Widget | None = None  # dialogue d'accueil ouvert
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -102,10 +105,12 @@ class LuminaApp(Adw.Application):
         win = self.props.active_window
         if win is not None:
             win.present()
-        elif self.first_run:
-            self._show_onboarding()
-        else:
-            self._open_main()
+            return
+        # Premier lancement : réglage du dossier des notes ; sinon la fenêtre principale,
+        # onglets de la session déjà restaurés. L'accueil s'affiche par-dessus, une fois.
+        win = self._show_onboarding() if self.first_run else self._open_main()
+        if win is not None:
+            self._maybe_show_welcome(win)
 
     def do_open(self, files, _n_files, _hint):
         """Fichiers passés en argument (Ouvrir avec…) : ouverts chacun dans un onglet."""
@@ -119,6 +124,7 @@ class LuminaApp(Adw.Application):
             win = self._open_main()
             if win is None:
                 return
+            self._maybe_show_welcome(win)
         win.open_files(paths)
         win.present()
 
@@ -145,12 +151,35 @@ class LuminaApp(Adw.Application):
         win.present()
         return win
 
-    def _show_onboarding(self, error: str | None = None):
+    def _show_onboarding(self, error: str | None = None) -> OnboardingWindow:
         win = OnboardingWindow(self, Path(self.config.notes_dir).expanduser(),
                                on_done=self._finish_onboarding)
         win.present()
         if error:
             win.toast_overlay.add_toast(Adw.Toast.new(error))
+        return win
+
+    # ================================================================== Accueil
+
+    def _maybe_show_welcome(self, parent: Gtk.Window):
+        """Dialogue d'accueil, tant que config.json ne dit pas qu'il a déjà été vu."""
+        if self.config.welcome_shown or self._welcome is not None:
+            return
+        self._welcome = show_welcome(parent, on_closed=self._on_welcome_closed)
+
+    def _on_welcome_closed(self):
+        self._welcome = None
+        self.config.welcome_shown = True
+        if self.first_run:
+            # config.json n'existe pas encore : il sera écrit avec le dossier choisi
+            # (_finish_onboarding). L'écrire maintenant ferait sauter ce réglage.
+            return
+        try:
+            self.config.save()
+        except OSError as e:
+            win = self.main_window()
+            if win is not None:
+                win.toast(_("Impossible d'enregistrer la configuration : {error}").format(error=e))
 
     def _finish_onboarding(self, folder: Path, create_samples: bool) -> str | None:
         """Appelé par « Commencer » ; retourne un message d'erreur, ou None si tout va bien."""

@@ -1,5 +1,6 @@
 """
-onboarding.py — écran d'accueil du premier lancement (pas encore de config.json).
+onboarding.py — réglage du premier lancement (pas encore de config.json),
+affiché derrière le dialogue d'accueil (welcome.py).
 
 Permet de choisir le dossier des notes et de créer quelques notes d'exemple.
 La fenêtre ne touche pas au disque : « Commencer » appelle
@@ -67,8 +68,8 @@ class OnboardingWindow(Adw.ApplicationWindow):
         box.append(start)
 
         status = Adw.StatusPage(
-            icon_name="document-edit-symbolic",
-            title=_("Bienvenue dans Lumina"),
+            icon_name="folder-documents-symbolic",
+            title=_("Où ranger vos notes ?"),   # « Bienvenue » : dialogue d'accueil (welcome.py)
             description=_("Des notes simples, enregistrées en Markdown dans le dossier "
                           "de votre choix. Vous pourrez le changer plus tard dans les préférences."),
             child=Adw.Clamp(maximum_size=440, child=box),

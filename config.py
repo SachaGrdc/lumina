@@ -40,6 +40,8 @@ class Config:
     theme: str = "system"         # voir THEMES
     font_size: int = 13           # points
     line_numbers: bool = False
+    # Dialogue d'accueil (welcome.py) déjà vu ? Faux tant qu'il n'a pas été fermé une fois.
+    welcome_shown: bool = False
     # Onglets ouverts à la fermeture, rouverts au lancement : [{"path": str, "cursor": int}…]
     tabs: list = field(default_factory=list)
     active_tab: int = 0

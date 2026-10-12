@@ -106,6 +106,19 @@ EN = {
     "Impossible d'enregistrer la configuration : {error}": "Could not save the settings: {error}",
     # --- accueil
     "Bienvenue dans Lumina": "Welcome to Lumina",
+    "Où ranger vos notes ?": "Where should your notes go?",
+    "Votre éditeur de notes Markdown fluide, minimaliste et pensé pour GNOME.":
+        "Your smooth, minimalist Markdown notes editor, designed for GNOME.",
+    "Organisation intuitive": "Intuitive organization",
+    "Arborescence de dossiers, corbeille et glisser-déposer.":
+        "Folder tree, trash and drag and drop.",
+    "Navigation par onglets": "Tabbed navigation",
+    "Ouvrez plusieurs notes simultanément (Ctrl + T).": "Open several notes at once (Ctrl + T).",
+    "Sauvegarde automatique": "Automatic saving",
+    "Vos modifications sont enregistrées en temps réel.": "Your changes are saved as you type.",
+    "Recherche globale": "Global search",
+    "Retrouvez vos idées instantanément dans toutes vos notes.":
+        "Find your ideas instantly across all your notes.",
     "Des notes simples, enregistrées en Markdown dans le dossier de votre choix. "
     "Vous pourrez le changer plus tard dans les préférences.":
         "Simple notes, saved as Markdown in the folder of your choice. "
