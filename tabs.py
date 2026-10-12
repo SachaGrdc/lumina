@@ -2,11 +2,12 @@
 tabs.py — onglets de l'éditeur (Adw.TabView + Adw.TabBar).
 
 Chaque onglet contient une `NotePage` (editor.py). La barre d'onglets se masque
-tant qu'il n'y a qu'un onglet. Il reste toujours au moins un onglet : fermer le
-dernier le transforme en page blanche.
+tant qu'il n'y a qu'un onglet. Sans aucun onglet (tous fermés, ou rien à rouvrir
+au lancement), `widget` affiche à la place la page « état vide » fournie ; il
+rebascule sur l'éditeur dès qu'un onglet est ajouté.
 
 Le widget ne connaît pas la fenêtre : il signale le changement d'onglet via
-`on_selected` et reçoit les pages toutes faites.
+`on_selected` (None quand il n'y a plus d'onglet) et reçoit les pages toutes faites.
 """
 
 from pathlib import Path
@@ -16,16 +17,26 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw  # noqa: E402
+from gi.repository import Adw, Gtk  # noqa: E402
 
 from editor import NotePage  # noqa: E402
 
+TRANSITION_MS = 200      # fondu état vide <-> éditeur
+
 
 class NoteTabs:
-    def __init__(self, on_selected: Callable[[NotePage], None]):
+    def __init__(self, on_selected: Callable[[NotePage | None], None], empty_page: Gtk.Widget):
         self._on_selected = on_selected
         self.view = Adw.TabView()
         self.bar = Adw.TabBar(view=self.view, autohide=True)
+
+        # Ce qu'on place dans la fenêtre : l'état vide OU les onglets.
+        self.widget = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE,
+                                transition_duration=TRANSITION_MS)
+        self.widget.add_named(empty_page, "empty")
+        self.widget.add_named(self.view, "tabs")
+        self.view.connect("notify::n-pages", lambda *_a: self._update_visible())
+        self._update_visible()
         # Ctrl+Début / Ctrl+Fin doivent rester des raccourcis de l'éditeur de texte.
         if hasattr(self.view, "remove_shortcuts"):  # libadwaita >= 1.2
             self.view.remove_shortcuts(Adw.TabViewShortcuts.CONTROL_HOME
@@ -96,19 +107,14 @@ class NoteTabs:
                 tooltip = page.path.name
         tab.set_tooltip(tooltip)
 
+    def _update_visible(self):
+        self.widget.set_visible_child_name("tabs" if self.view.get_n_pages() else "empty")
+
     def _on_selected_changed(self, *_args):
-        page = self.current
-        if page is not None:
-            self._on_selected(page)
+        self._update_visible()
+        self._on_selected(self.current)   # None : plus aucun onglet
 
     def _on_close_page(self, view: Adw.TabView, tab: Adw.TabPage):
-        page = tab.get_child()
-        if view.get_n_pages() == 1:  # dernier onglet : il redevient une page blanche
-            page.start_draft(page.store.root)
-            view.close_page_finish(tab, False)
-            self._sync(tab)
-            self._on_selected(page)
-        else:
-            page.close()
-            view.close_page_finish(tab, True)
+        tab.get_child().close()   # enregistre et arrête les minuteurs de l'onglet
+        view.close_page_finish(tab, True)
         return True  # fermeture prise en charge

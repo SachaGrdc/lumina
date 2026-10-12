@@ -140,7 +140,7 @@ class LuminaApp(Adw.Application):
         win.set_line_numbers(self.config.line_numbers)
         if state is not None:
             win.restore_state(state)
-        else:  # onglets de la session précédente (curseur compris), ou une page blanche
+        else:  # onglets de la session précédente (curseur compris), ou l'état vide
             win.restore_tabs(self.config.tabs, self.config.active_tab)
         win.present()
         return win

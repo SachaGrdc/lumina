@@ -72,7 +72,7 @@ class LuminaWindow(Adw.ApplicationWindow):
         self.sidebar = Sidebar(self.store, self.pins, SidebarCallbacks(
             open_note=lambda path, new_tab: self.open_note(path, new_tab=new_tab),
             before_search=self._flush,
-            leave_search=lambda: self.current_page.text_view.grab_focus(),
+            leave_search=self._focus_editor,
             move=self._move_item,
             group=self._group_notes,
             import_files=self._import_files,
@@ -102,17 +102,27 @@ class LuminaWindow(Adw.ApplicationWindow):
         self.window_title = Adw.WindowTitle(title="Lumina", subtitle="")
         header.set_title_widget(self.window_title)
 
-        # Onglets : la barre n'apparaît qu'à partir de deux onglets ; il y a toujours
-        # au moins un onglet (une page blanche au départ).
-        self.tabs = NoteTabs(on_selected=self._on_tab_selected)
-        self.tabs.add(self._make_page())
+        # Onglets : la barre n'apparaît qu'à partir de deux onglets ; sans aucun
+        # onglet, l'état vide s'affiche à la place de l'éditeur.
+        self.tabs = NoteTabs(on_selected=self._on_tab_selected,
+                             empty_page=self._build_empty_state())
 
-        self.toast_overlay = Adw.ToastOverlay(child=self.tabs.view)
+        self.toast_overlay = Adw.ToastOverlay(child=self.tabs.widget)
         self.sidebar.attach_open_target(self.toast_overlay)   # note glissée -> nouvel onglet
         view = Adw.ToolbarView(content=self.toast_overlay)
         view.add_top_bar(header)
         view.add_top_bar(self.tabs.bar)
         return view
+
+    @staticmethod
+    def _build_empty_state() -> Adw.StatusPage:
+        """Affiché quand aucune note n'est ouverte (aucun onglet)."""
+        return Adw.StatusPage(
+            icon_name="document-edit-symbolic",
+            title=_("Aucune note ouverte"),
+            description=_("Sélectionnez une note dans la barre latérale "
+                          "ou créez-en une nouvelle avec Ctrl + N."),
+            vexpand=True)
 
     def _make_page(self) -> NotePage:
         page = NotePage(self.store, on_materialize=self._materialize_draft, on_error=self.toast)
@@ -126,12 +136,13 @@ class LuminaWindow(Adw.ApplicationWindow):
             page.set_line_numbers(enabled)
 
     @property
-    def current_page(self) -> NotePage:
+    def current_page(self) -> NotePage | None:
+        """Onglet actif ; None quand aucun onglet n'est ouvert (état vide)."""
         return self.tabs.current
 
     @property
     def current_path(self) -> Path | None:
-        """Note de l'onglet actif (None pour une page blanche)."""
+        """Note de l'onglet actif (None : page blanche, ou aucun onglet)."""
         page = self.tabs.current
         return page.path if page is not None else None
 
@@ -171,26 +182,26 @@ class LuminaWindow(Adw.ApplicationWindow):
     def restore_tabs(self, tabs: list[dict], active: int = 0):
         """
         Ouverture : rouvre les onglets de la session précédente (note et position du
-        curseur), sinon une page blanche prête à être tapée. Les notes disparues
-        entre-temps sont ignorées.
+        curseur). Sans rien à rouvrir, l'état vide « Aucune note ouverte » s'affiche.
+        Les notes disparues ou illisibles sont ignorées.
         """
-        entries: list[tuple[Path, int]] = []
+        pages: list[NotePage] = []
         for tab in tabs:
             path = Path(tab["path"])
-            if (path.is_file() and self.store.contains(path)
-                    and not self.store.in_trash(path) and path not in (p for p, _c in entries)):
-                entries.append((path, tab.get("cursor", 0)))
-
-        selected = self.tabs.current
-        for i, (path, cursor) in enumerate(entries):
-            page = self.tabs.current if i == 0 else self.tabs.add(self._make_page(), select=False)
+            if (not path.is_file() or not self.store.contains(path) or self.store.in_trash(path)
+                    or any(p.path == path for p in pages)):
+                continue
+            page = self._make_page()
             if page.load(path):
-                page.restore_cursor(cursor)
-            if i == min(active, len(entries) - 1):
-                selected = page
-        self.tabs.sync_titles()
-        self.tabs.select(selected)
-        self._on_tab_selected(selected)   # même si l'onglet sélectionné n'a pas changé
+                page.restore_cursor(tab.get("cursor", 0))
+                pages.append(page)
+
+        for page in pages:
+            self.tabs.add(page, select=False)
+        selected = pages[min(active, len(pages) - 1)] if pages else None
+        if selected is not None:
+            self.tabs.select(selected)
+        self._on_tab_selected(selected)   # même si la sélection n'a pas changé
 
     # ================================================================== Actions
 
@@ -201,7 +212,7 @@ class LuminaWindow(Adw.ApplicationWindow):
                 ("rename", lambda *_a: self._rename_path(self._keyboard_target())),
                 ("save", lambda *_a: self._flush()),   # Ctrl+S, facultatif et silencieux
                 ("new-tab", lambda *_a: self._new_tab()),
-                ("close-tab", lambda *_a: self.tabs.close(self.current_page)),
+                ("close-tab", lambda *_a: self.current_page and self.tabs.close(self.current_page)),
                 ("print", lambda *_a: self._print()),
                 ("focus-search", lambda *_a: self._focus_search()),
                 ("toggle-sidebar", lambda *_a: self.split_view.set_show_sidebar(
@@ -391,7 +402,7 @@ class LuminaWindow(Adw.ApplicationWindow):
         """
         Fichiers reçus du système (Ouvrir avec…). Une note du dossier de notes est
         ouverte telle quelle ; un fichier situé ailleurs y est d'abord copié. Chaque
-        fichier a son onglet (la page blanche est réutilisée).
+        fichier a son onglet (une page blanche encore vide est réutilisée).
         """
         for path in paths:
             path = path.resolve()
@@ -403,7 +414,8 @@ class LuminaWindow(Adw.ApplicationWindow):
                     continue
                 self.sidebar.refresh()
                 self.toast(_("« {name} » importé").format(name=path.stem))
-            self.open_note(path, new_tab=self.current_page.path is not None)
+            page = self.current_page
+            self.open_note(path, new_tab=page is None or page.path is not None)
 
     # ================================================================== Corbeille
 
@@ -523,7 +535,8 @@ class LuminaWindow(Adw.ApplicationWindow):
             page.remap(old, new)
         self.pins.remap(old, new)
         self.tabs.sync_titles()
-        self.window_title.set_title(self.current_page.title)
+        page = self.current_page
+        self.window_title.set_title(page.title if page is not None else "Lumina")
         self.sidebar.set_current(self.current_path)
 
     @staticmethod
@@ -541,7 +554,8 @@ class LuminaWindow(Adw.ApplicationWindow):
 
     def open_note(self, path: Path, new_tab: bool = False):
         """
-        Ouvre `path` dans l'onglet actif (ou dans un nouvel onglet). Une note déjà
+        Ouvre `path` dans l'onglet actif (ou dans un nouvel onglet, forcément s'il
+        n'y en a aucun : l'état vide laisse alors place à l'éditeur). Une note déjà
         ouverte dans un onglet n'est pas dupliquée : on bascule simplement dessus.
         """
         existing = self.tabs.find(path)
@@ -549,7 +563,7 @@ class LuminaWindow(Adw.ApplicationWindow):
             self.tabs.select(existing)
             self._focus_editor()
             return
-        if new_tab:
+        if new_tab or self.current_page is None:
             page = self._make_page()
             if page.load(path):
                 self.tabs.add(page)   # la sélection appelle _on_tab_selected
@@ -565,11 +579,12 @@ class LuminaWindow(Adw.ApplicationWindow):
         self._show_trash(False)
         self.tabs.add(page)
 
-    def _on_tab_selected(self, page: NotePage):
-        """Onglet actif changé (ou son contenu) : titre, barre latérale, focus."""
+    def _on_tab_selected(self, page: NotePage | None):
+        """Onglet actif changé (ou son contenu) : titre, barre latérale, focus.
+        `page` vaut None quand le dernier onglet a été fermé (état vide)."""
         self.tabs.sync_titles()
-        self.window_title.set_title(page.title)
-        self.sidebar.set_current(page.path)
+        self.window_title.set_title(page.title if page is not None else "Lumina")
+        self.sidebar.set_current(page.path if page is not None else None)
         self._focus_editor()
 
     def _materialize_draft(self, page: NotePage) -> bool:
@@ -588,8 +603,11 @@ class LuminaWindow(Adw.ApplicationWindow):
         return True
 
     def _focus_editor(self):
+        page = self.current_page
+        if page is None:   # état vide : rien à éditer, la barre latérale reste accessible
+            return
         # set_focus fonctionne aussi avant l'affichage de la fenêtre (au lancement).
-        self.set_focus(self.current_page.text_view)
+        self.set_focus(page.text_view)
         if self.split_view.get_collapsed():   # mode étroit : on révèle l'éditeur
             self.split_view.set_show_sidebar(False)
 
@@ -600,7 +618,8 @@ class LuminaWindow(Adw.ApplicationWindow):
 
     def _print(self):
         page = self.current_page
-        print_note(self, page.title, page.text(), on_error=self.toast)
+        if page is not None:
+            print_note(self, page.title, page.text(), on_error=self.toast)
 
     def _on_active_changed(self, *_args):
         if self.is_active():

@@ -41,6 +41,9 @@ EN = {
     "Nouveau nom pour la note « {name} »": "New name for the note “{name}”",
     "Épinglées": "Pinned",
     "Nouvel onglet": "New tab",
+    "Aucune note ouverte": "No note open",
+    "Sélectionnez une note dans la barre latérale ou créez-en une nouvelle avec Ctrl + N.":
+        "Select a note in the sidebar or create a new one with Ctrl + N.",
     "Ouvrir dans un nouvel onglet": "Open in New Tab",
     "Imprimer / Exporter en PDF…": "Print / Export as PDF…",
     "Impression impossible : {error}": "Could not print: {error}",
